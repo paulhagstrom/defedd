@@ -23,7 +23,7 @@ import time
 # why.  Guess in the meantime I could hardcode things in here for testing.
 
 # Snack Attack parm guides just give deprotection info (CLC in nibble check I think).
-# Wizardry is supposed to have boot disk write protected.
+# Wizardry is supposed to have boot disk write protected. Tracks A-E are crucial for counting.
 # Copts and Robbers: 0 addr DDAADA data MAX=25? sync; 1.5-13/15.5 by 1 sync
 # Choplifter complex: 0, 1-8, 9, A-B, C-1E.5 by .5, 20 CII+
 
@@ -780,11 +780,13 @@ def find_sync(track):
 	offsets = track['offsets']
 	for offset in range(len(nibbles)):
 		# FF sync will obviously have slurped up more than 8 bits, usually 10.
-		if nibbles[offset] == 255 and nits[offset] > 8:
+		# if nibbles[offset] == 255 and nits[offset] > 8:
+		# Try looking not for FFs but just for long nibbles.
+		if nits[offset] > 8:
 			current_run += 1
 		else:
-			# There is no such thing as a run of fewer than 5 sync nibbles, I call.
-			if current_run > 4:
+			# Try to skip over syncs within a sector
+			if current_run > 5:
 				runs_sequential.append([current_run, offsets[offset], offset])
 			current_run = 0
 	# sort runs by size so we can find the top two
@@ -887,7 +889,59 @@ def set_track_points_to_sync(track):
 	# 		sync_haystack = x
 	# 		break
 	message('Sync marks now say: Needle: {:6d} Haystack: {:6d} Distance: {:6d}'.format(\
-		sync_needle, sync_haystack, sync_haystack - sync_needle), 2)
+		sync_needle, sync_haystack, sync_haystack - sync_needle), 1)
+	if options['verbose']:
+		message('Sync based track structure looks like:', 1)
+		display_needle = sync_needle_index
+		display_haystack = sync_haystack_index
+		sync_diff = sync_haystack_index - sync_needle_index
+		prev0 = track['sync_runs_sequential'][sync_needle_index][1]
+		prev1 = track['sync_runs_sequential'][sync_haystack_index][1]
+		columns = 0
+		sync_runs = len(track['sync_runs_sequential'])
+		while display_needle < sync_haystack_index - 1:
+			needle_run = track['sync_runs_sequential'][display_needle]
+			run0 = needle_run[0]
+			off0 = needle_run[1]
+			diff0 = off0 - prev0
+			if display_haystack < sync_runs:
+				haystack_run = track['sync_runs_sequential'][display_haystack]
+				run1 = haystack_run[0]
+				off1 = haystack_run[1]
+				diff1 = off1 - prev1
+			else:
+				off1 = 0
+				run1 = 0
+				diff1 = 0
+			if off1 > sync_haystack + sync_haystack - sync_needle:
+				message('!', 1, end = '')
+			else:
+				message(' ', 1, end = '')
+			message("{:5d}:{:5d}...[{:3d}:{:3d}]...".format(diff0, diff1, run0, run1), 1, end='')
+			prev0 = off0
+			prev1 = off1
+			display_needle += 1
+			display_haystack += 1
+			# if diff0 is less than half diff1 then advance needle again
+			if diff0 < diff1 / 2:
+				off = track['sync_runs_sequential'][display_needle][1]
+				message('>>{}: '.format(off - prev0), 1)
+				prev0 = 0
+				display_needle += 1
+				columns = 0
+			# same for run1
+			if display_haystack < sync_runs:
+				if diff1 < diff0 / 2:
+					off = track['sync_runs_sequential'][display_haystack][1]
+					message('>>:{} '.format(off - prev1), 1)
+					prev1 = off
+					display_haystack += 1
+					columns = 0
+			columns += 1
+			if columns > 4:
+				message('', 1)
+				columns = 0
+		message('', 1)
 	# We should have backed up enough by now that a full track is available from both
 	# sync_needle and sync_haystack
 	# save them as the definitive start points for the track and its second copy
