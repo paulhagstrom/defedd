@@ -22,11 +22,18 @@ import time
 # so I can manually try things with trial and error until something works and try to figure out
 # why.  Guess in the meantime I could hardcode things in here for testing.
 
+# Snack Attack parm guides just give deprotection info (CLC in nibble check I think).
+# Wizardry is supposed to have boot disk write protected.
+# Copts and Robbers: 0 addr DDAADA data MAX=25? sync; 1.5-13/15.5 by 1 sync
+# Choplifter complex: 0, 1-8, 9, A-B, C-1E.5 by .5, 20 CII+
+
+
+
 # options will be stored globally for retrievability
 options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 'write_log': False,
 		'process_fractional': True, 'analyze_sectors': True, 'write_full': False, 'no_translation': False,
 		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'repair_tracks': True, 'use_second': False,
-		'use_slice': False, 'from_zero': False}
+		'use_slice': False, 'from_zero': False, 'write_protect': False}
 
 def main(argv=None):
 	'''Main entry point'''
@@ -35,8 +42,8 @@ def main(argv=None):
 	print("defedd - analyze and convert EDD files.")
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20s", \
-			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice"])
+		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20sp", \
+			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "protect"])
 	except getopt.GetoptError as err:
 		print(str(err))
 		usage()
@@ -84,6 +91,9 @@ def main(argv=None):
 		elif o == "-s" or o == "--slice":
 			options['use_slice'] = True
 			print("Will write track-length bits starting from beginning of EDD sample for unparseable tracks")
+		elif o == "-p" or o == "--protect":
+			options['write_protect'] = True
+			print("Will write image as write protected if supported (FDI)")
 		elif o == "-v" or o == "--verbose":
 			options['verbose'] = True
 			print("Will be more chatty about progress than usual.")
@@ -248,7 +258,10 @@ def write_fdi_file(eddfile, tracks):
 		fdifile.write(b"\x00") #last head
 		fdifile.write(b"\x01") #5.25
 		fdifile.write(b"\xac") #300 rpm
-		fdifile.write(b"\x00") #flags, not write protected, not index synchronized
+		if options['write_protect']:
+			fdifile.write(b"\x01") #flags, not write protected, not index synchronized
+		else:
+			fdifile.write(b"\x00") #flags, not write protected, not index synchronized
 		fdifile.write(b"\x05") #192 tpi (quarter tracks)
 		fdifile.write(b"\x05") #192 tpi (quarter tracks, though the heads aren't really this narrow)
 		fdifile.write(b"\x00\x00") #reserved
