@@ -214,6 +214,7 @@ Options:
  -0, --zero    Write EDD bits from 0 instead of found track (slice for formatted)
  -k, --keep    Do not attempt to repair bitstream
  -2, --second  Use second track repeat if choice is needed (default is first)
+ -p, --protect Write protect the disk image if supported (fdi)
  -d, --dsk     Write .dsk file (data-only 16-sector standard images)
  -n, --nib     Write .nib file (for 13-sectors and light protection)
  -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
