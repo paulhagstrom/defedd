@@ -778,6 +778,7 @@ def find_sync(track):
 	nibbles = track['nibbles']
 	nits = track['nits']
 	offsets = track['offsets']
+	prev_nib_offset = 0
 	for offset in range(len(nibbles)):
 		# FF sync will obviously have slurped up more than 8 bits, usually 10.
 		# if nibbles[offset] == 255 and nits[offset] > 8:
