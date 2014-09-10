@@ -9,24 +9,15 @@ import time
 
 # Paul Hagstrom, started August 2014
 # First attempt at using Python, so brace yourself for the occasional non-Pythonic dumbness.
-# Current status: Can do dsk, nib, fdi
-# mfi untested, whole tracks only so far.
-# I tightened up some of the loops and it helped quite a bit
-# Choplifter only works with no translation fdi files.
-# Wizardry doesn't work
-# Snack Attack doesn't work
-# I've been playing around tweaking things, ways to make output clearer
-# also the track match, which now simply checks for about 95% match within the region checked
-# Still not working consistently, wish I knew what makes the difference between good and bad
-# Perhaps try to add a parameter file so that I can set the behavior of individual tracks
-# so I can manually try things with trial and error until something works and try to figure out
-# why.  Guess in the meantime I could hardcode things in here for testing.
-
+# In its current state I haven't gotten it to write mfi successfully yet.
+# Recent update to mfi spec may be relevant, can now do quarter tracks.
+# Not entirely reliable at finding track divisions, this is probably where all the errors are.
+# Tries to "repair" bit slips by comparing two samples of a track, might be unwise.
+# Soem testing notes for things that might be ueful:
 # Snack Attack parm guides just give deprotection info (CLC in nibble check I think).
 # Wizardry is supposed to have boot disk write protected. Tracks A-E are crucial for counting.
 # Copts and Robbers: 0 addr DDAADA data MAX=25? sync; 1.5-13/15.5 by 1 sync
 # Choplifter complex: 0, 1-8, 9, A-B, C-1E.5 by .5, 20 CII+
-
 
 
 # options will be stored globally for retrievability
@@ -222,6 +213,19 @@ Options:
  -l, --log     Write .log file of conversion output
  -v, --verbose Be more verbose than usual
  -w, --werbose Be way, way (ponponpon) more verbose than usual (implies -v)
+
+ Examples:
+ defedd.py -d eddfile.edd (write a dsk file, standard 16-sector format)
+ defedd.py -qaf eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
+ 	(works for Choplifter)
+ defedd.py -qn eddfile.edd (write a nib file, skip sector analysis)
+ 	(works for 16-sector disks, not stress tested yet)
+ defedd.py -fk eddfile.edd (write small fdi file for OE, don't fix bit slips)
+ 	(works for ... nothing much yet)
+ defedd.py -f eddfile.edd (write a one-revolution fdi file for OE with analysis)
+ 	(works for simple 16-sector disks)
+ defedd.py -mk eddfile.edd (write an mfi file for MESS, with analysis, no repairs)
+ 	(does not work yet)
  	''')
 	return
 
@@ -729,30 +733,11 @@ def check_match(needlebits, haystackbits):
 	if needlebits == haystackbits:
 		return True
 	# If the match wasn't exact, we need to scan
-	# I am at this point simply making this up, but here is the strategy:
-	# A 1 could either be real or a spurious 1.
-	# The odds of getting three spurious 1s in a row are low because the gain should be reset.
-	# NOTE: I'm not sure about this.  It might be that even spurious 1s can come in longer streams
-	# if the gain is not reset.  And I'm not sure why it would be, come to think of it.
-	# This is a truly hard problem.
-	# I think the *zeros* can be trusted perhaps more than the ones. Maybe that's what I should be
-	# doing, scanning and failing if the zeros don't line up.
-	# Wait, no, that doesn't make any sense.  A zero could be lined up with a spurious 1.
-	# Maybe I just need a simple threshold for failure.  Give up if failure exceeds 10% or sutin.
-	# So two bitstrings match if for every 111 in one we have **1 in the other.
-	# This scans for 111s, and bails out with a failed match if the other contains **0.
-	# This does not account for "slippage" -- can't recover from an extra bit in one stream
+	# At first I was trying to deal with the possibility of getting a spurious 1
+	# Now I'm just going for a high degree of match.
 	# If we make it all the way through, we matched
-	# matched = True
-	# for offset in range(3, len(needlebits)):
 	score = 50 # five bits for free
 	for offset in range(0, len(needlebits)):
-		# alt_offset = offset - 1
-		# check_begin = offset - 3
-		# if needlebits[check_begin: offset] == three_ones and haystackbits[alt_offset] == 0:
-		# 	matched = False
-		# 	break
-		# if haystackbits[check_begin: offset] == three_ones and needlebits[alt_offset] == 0:
 		if haystackbits[offset] == needlebits[offset]:
 			score += 1
 		else:
@@ -781,7 +766,6 @@ def find_sync(track):
 	prev_nib_offset = 0
 	for offset in range(len(nibbles)):
 		# FF sync will obviously have slurped up more than 8 bits, usually 10.
-		# if nibbles[offset] == 255 and nits[offset] > 8:
 		# Try looking not for FFs but just for long nibbles.
 		if nits[offset] > 8:
 			current_run += 1
@@ -873,22 +857,9 @@ def set_track_points_to_sync(track):
 		message('Haystack sync mark too far forward.  Will retreat.  Needle: {:6d} Haystack: {:6d} Distance: {:6d}'.format(\
 			sync_needle, sync_haystack, sync_haystack - sync_needle), 2)
 		sync_needle_index -= 1
-		# while track['sync_runs_sequential'][sync_needle_index][0] < 7:
-		# 	sync_needle_index -= 1
 		sync_haystack_index -= 1
-		# while track['sync_runs_sequential'][sync_haystack_index][0] < 7:
-		# 	sync_haystack_index -= 1
 		sync_needle = sync_offsets[sync_needle_index]
 		sync_haystack = sync_offsets[sync_haystack_index]
-	# Now push forward again to first string of 111 to try to counter spurious 1s
-	# for x in range(sync_needle, sync_needle + 2048):
-	# 	if bits[x: x+3] == three_ones:
-	# 		sync_needle = x
-	# 		break
-	# for x in range(sync_haystack, sync_haystack + 2048):
-	# 	if bits[x: x+3] == three_ones:
-	# 		sync_haystack = x
-	# 		break
 	message('Sync marks now say: Needle: {:6d} Haystack: {:6d} Distance: {:6d}'.format(\
 		sync_needle, sync_haystack, sync_haystack - sync_needle), 1)
 	if options['verbose']:
@@ -1001,13 +972,6 @@ def find_repeats(track):
 		found_match = False
 		track['match_hits'] = [0, 0, 0, 0]
 		while needle_offset < stop_needle:
-			# Push the needle forward until it's on a sequence of three 1s in a row, within reason.
-			# This is to try to avoid spurious bits if possible.
-			# Very well could land us in the middle of sync.  Not sure if that's a problem.
-			# for x in range(needle_offset, needle_offset + 1024):
-			# 	if bits[x: x+3] == three_ones:
-			# 		needle_offset = x
-			# 		break
 			# start the search at what is approximately the minimum length a track might be
 			haystack_offset = needle_offset + track_minimum
 			# but actually if we're at a point where a whole second sample can no longer be available, bail
@@ -1082,6 +1046,7 @@ def find_repeats(track):
 		track = repair_bitstream(track)
 		# since this may have changed during the repair, recompute the length
 		track['data_bits'] = track['match_haystack'] - track['match_needle']
+	# TODO: I'm getting some negative numbers here occasionally, something is not logically correct here.
 	# compute the byte information for the bitstream for the fdi file
 	# for this I will re-ecode the bytes from the slice of the bitstream
 	# If needle was zero, this is in principle identical to what was in the EDD file
