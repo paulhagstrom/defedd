@@ -24,7 +24,7 @@ import time
 options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 'write_log': False,
 		'process_fractional': True, 'analyze_sectors': True, 'write_full': False, 'no_translation': False,
 		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'repair_tracks': True, 'use_second': False,
-		'use_slice': False, 'from_zero': False, 'write_protect': False}
+		'use_slice': False, 'from_zero': False, 'write_protect': False, 'write_po': False}
 
 def main(argv=None):
 	'''Main entry point'''
@@ -33,8 +33,8 @@ def main(argv=None):
 	print("defedd - analyze and convert EDD files.")
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20sp", \
-			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "protect"])
+		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20spx", \
+			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "po", "protect"])
 	except getopt.GetoptError as err:
 		print(str(err))
 		usage()
@@ -55,6 +55,9 @@ def main(argv=None):
 		elif o == "-d" or o == "--dsk":
 			options['write_dsk'] = True
 			print("Will save dsk file.")
+		elif o == "-p" or o == "--po":
+			options['write_po'] = True
+			print("Will save ProDOS-ordered po (dsk-like) file.")
 		elif o == "-l" or o == "--log":
 			options['write_log'] = True
 			print("Will save log file.")
@@ -82,7 +85,7 @@ def main(argv=None):
 		elif o == "-s" or o == "--slice":
 			options['use_slice'] = True
 			print("Will write track-length bits starting from beginning of EDD sample for unparseable tracks")
-		elif o == "-p" or o == "--protect":
+		elif o == "-x" or o == "--protect":
 			options['write_protect'] = True
 			print("Will write image as write protected if supported (FDI)")
 		elif o == "-v" or o == "--verbose":
@@ -109,6 +112,7 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 		return 1
 	options['nibfilename'] = eddfilename + ".nib"
 	options['dskfilename'] = eddfilename + ".dsk"
+	options['pofilename'] = eddfilename + ".po"
 	options['mfifilename'] = eddfilename + ".mfi"
 	options['fdifilename'] = eddfilename + ".fdi"
 	options['logfilename'] = eddfilename + ".log"
@@ -117,6 +121,9 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 	if options['process_fractional'] and not options['write_mfi'] and not options['write_fdi']:
 		options['process_fractional'] = False
 		print('Only processing whole tracks, no sense in processing fractional tracks unless they will be stored.')
+	if options['write_dsk'] and options['write_po']:
+		options['write_po'] = False
+		print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
 	# TODO: Maybe there is other sanity checking to do here, add if it occurs to me
 
 	# TODO: Maybe at some point write out the images as we process each track rather than keeping whole disk in memory.
@@ -156,7 +163,7 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 
 		if options['write_nib']:
 			write_nib_file(eddfile, tracks)
-		if options['write_dsk']:
+		if options['write_dsk'] or options['write_po']:
 			write_dsk_file(eddfile, tracks)
 		if options['write_fdi']:
 			write_fdi_file(eddfile, tracks)
@@ -207,6 +214,7 @@ Options:
  -2, --second  Use second track repeat if choice is needed (default is first)
  -p, --protect Write protect the disk image if supported (fdi)
  -d, --dsk     Write .dsk file (data-only 16-sector standard images)
+ -p, --po      Write .po file (data-only, 16-sector ProDOS ordered images)
  -n, --nib     Write .nib file (for 13-sectors and light protection)
  -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
  -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
@@ -230,9 +238,10 @@ Options:
 	return
 
 def write_dsk_file(eddfile, tracks):
-	'''Write the data out in the form of a 34-track dsk file'''
+	'''Write the data out in the form of a 34-track dsk or po file'''
 	global options
-	with open(options['dskfilename'], mode="wb") as dskfile:
+	outfile = options['pofilename'] if options['write_po'] else options['dskfilename']
+	with open(outfile, mode="wb") as dskfile:
 		for track in tracks:
 			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
 				dskfile.write(track['track_bytes'])
@@ -537,11 +546,19 @@ def dos_order(logical_sector):
 		0x08: 0x0e, 0x09: 0x0c, 0x0a: 0x0a, 0x0b: 0x08, 0x0c: 0x06, 0x0d: 0x04, 0x0e: 0x02, 0x0f: 0x0f,
 		}[logical_sector]
 
+def prodos_order(logical_sector):
+	'''ProDOS sector skewing'''
+	return {
+		0x00: 0x00, 0x01: 0x02, 0x02: 0x04, 0x03: 0x06, 0x04: 0x08, 0x05: 0x0a, 0x06: 0x0c, 0x07: 0x0e,
+		0x08: 0x01, 0x09: 0x03, 0x0a: 0x05, 0x0b: 0x07, 0x0c: 0x09, 0x0d: 0x0b, 0x0e: 0x0d, 0x0f: 0x0f,
+		}[logical_sector]
+
 def consolidate_sectors(track):
 	'''Consolidate all the sectors we found into a standard 13/16 for writing to dsk'''
 	global options
 	sorted_sectors = {}
 	dos32_mode = False
+	prodos_mode = options['write_po']
 	if options['werbose']:
 		message('Consolidating found sectors by reported sector number and checking data integrity.')
 	for found_sector in track['all_sectors']:
@@ -602,7 +619,12 @@ def consolidate_sectors(track):
 	track_ok = True
 	for logical_sector in range(16):
 		# TODO: Allow for CP/M, Pascal, ProDOS skewing as well at some point
-		physical_sector = logical_sector if dos32_mode else dos_order(logical_sector)
+		if dos32_mode:
+			physical_sector = logical_sector
+		elif prodos_mode:
+			physical_sector = prodos_order(logical_sector)
+		else:
+			physical_sector = dos_order(logical_sector)
 		try:
 			sector = sorted_sectors[physical_sector][0]
 			if sector['data_checksum_ok']:
