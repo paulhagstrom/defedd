@@ -7,13 +7,20 @@ import struct
 import math
 import time
 
+# defedd - converter/analyzer for EDD files (disk images produced by I'm fEDD Up, Brutal Deluxe)
 # Paul Hagstrom, started August 2014
 # First attempt at using Python, so brace yourself for the occasional non-Pythonic dumbness.
+# TODO: I have not been very good at making this readable by anyone but me, or even by me-at-a-distance.
+# TODO: Need to refresh current state up here.  This is out of date.
+# TODO: Consider whether .dsk is a good target at all, vs. .do (to make explicit the ordering)
+# TODO: Handle d13 13-sector images, and figure out what emulators support them.  (Though I think it may be none.)
 # In its current state I haven't gotten it to write mfi successfully yet.
 # Recent update to mfi spec may be relevant, can now do quarter tracks.
 # Not entirely reliable at finding track divisions, this is probably where all the errors are.
 # Tries to "repair" bit slips by comparing two samples of a track, might be unwise.
-# Soem testing notes for things that might be ueful:
+# Doesn't really work.  Kind of in a half done state at the moment.
+# Bit matches not really working very well, looks very likely that each read is different.
+# Some testing notes for things that might be ueful:
 # Snack Attack parm guides just give deprotection info (CLC in nibble check I think).
 # Wizardry is supposed to have boot disk write protected. Tracks A-E are crucial for counting.
 # Copts and Robbers: 0 addr DDAADA data MAX=25? sync; 1.5-13/15.5 by 1 sync
@@ -22,9 +29,10 @@ import time
 
 # options will be stored globally for retrievability
 options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 'write_log': False,
-		'process_fractional': True, 'analyze_sectors': True, 'write_full': False, 'no_translation': False,
+		'process_quarter': True, 'analyze_sectors': True, 'write_full': False, 'no_translation': False,
 		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'repair_tracks': True, 'use_second': False,
-		'use_slice': False, 'from_zero': False, 'write_protect': False, 'write_po': False}
+		'use_slice': False, 'from_zero': False, 'write_protect': False, 'write_po': False, 'write_v2d': False,
+		'process_halves': True}
 
 def main(argv=None):
 	'''Main entry point'''
@@ -33,8 +41,8 @@ def main(argv=None):
 	print("defedd - analyze and convert EDD files.")
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20spx", \
-			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "po", "protect"])
+		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20spx5", \
+			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "po", "protect", "v2d"])
 	except getopt.GetoptError as err:
 		print(str(err))
 		usage()
@@ -49,6 +57,9 @@ def main(argv=None):
 		elif o == "-m" or o == "--mfi":
 			options['write_mfi'] = True
 			print("Will save mfi file.")
+		elif o == "-5" or o == "--v2d":
+			options['write_v2d'] = True
+			print("Will save v2d/d5ni file.")
 		elif o == "-n" or o == "--nib":
 			options['write_nib'] = True
 			print("Will save nib file.")
@@ -62,7 +73,7 @@ def main(argv=None):
 			options['write_log'] = True
 			print("Will save log file.")
 		elif o == "-1" or o == "--int":
-			options['process_fractional'] = False
+			options['process_quarter'] = False
 			print("Will process only whole tracks.")
 		elif o == "-q" or o == "--quick":
 			options['analyze_sectors'] = False
@@ -115,54 +126,73 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 	options['pofilename'] = eddfilename + ".po"
 	options['mfifilename'] = eddfilename + ".mfi"
 	options['fdifilename'] = eddfilename + ".fdi"
+	options['v2dfilename'] = eddfilename + ".v2d"
 	options['logfilename'] = eddfilename + ".log"
 
 	# Do some sanity checking
-	if options['process_fractional'] and not options['write_mfi'] and not options['write_fdi']:
-		options['process_fractional'] = False
-		print('Only processing whole tracks, no sense in processing fractional tracks unless they will be stored.')
+	# TODO: Improve the style of the quarter/half/whole track decisionmaking here
+	if options['process_quarter'] and not options['write_mfi'] and not options['write_fdi']:
+		options['process_quarter'] = False
+		if options['process_halves'] and not options['write_v2d']:
+			print('Only processing whole tracks, no sense in processing quarter tracks unless they will be stored.')
+			options['process_halves'] = False
+		else:
+			print('Only processing half tracks, no sense in processing quarter tracks unless they will be stored.')
 	if options['write_dsk'] and options['write_po']:
 		options['write_po'] = False
 		print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
 	# TODO: Maybe there is other sanity checking to do here, add if it occurs to me
 
-	# TODO: Maybe at some point write out the images as we process each track rather than keeping whole disk in memory.
+	# Main analysis loop.  This goes through the whole EDD file track by track and analyzes each track.
+	# The resulting analyzed data is all accumulated in memory, then written back out in as many formats as requested.
+	
 	with open(eddfilename, mode="rb") as eddfile:
 		if options['write_log']:
 			options['console'].append(open(options['logfilename'], mode="w"))
 		tracks = []
 		current_track = 0.0
+		# Loop through the tracks
 		while True:
+			# Keep track of how long the track takes, helpful in trying to tighten the analysis loops
 			track_start_clock = time.clock()
 			eddbuffer = eddfile.read(16384)
+			# Analyze so long as we haven't run off the end of the file.
 			if eddbuffer:
-				if options['process_fractional'] or current_track == int(current_track):
+				# Skip over this data if it's not a whole track and only care about whole tracks
+				phase = (4 * current_track) % 4
+				if phase == 0 or options['process_quarter'] or (phase == 2 and options['process_halves']):
+					# track is the data structure we are storing all the accumulated information in.
 					track = {'track_number': current_track}
 					track['index_offset'] = 0 # bit position of the index pulse
 					# get track bits and parse them into nibbles
+					# this will also provide the sync regions which we can use to estimate track length
 					track['bits'] = bytes_to_bits(eddbuffer)
 					nibbles = nibblize(track['bits'])
 					track['nibbles'] = nibbles['nibbles']
 					track['offsets'] = nibbles['offsets']
-					track['nibbits'] = nibbles['nibbits']
 					track['nits'] = nibbles['nits']
+					track['sync_regions'] = nibbles['sync_regions']
 					# Analyze track for standard 13/16 formats, for dsk and repeat hinting
 					if options['analyze_sectors']:
 						track = consolidate_sectors(locate_sectors(track))
 					if options['write_fdi'] or options['write_mfi']:
 						# this bit level repeat finding is slow and not necessary for dsk/nib
 						# Find areas of sync nibbles for repeat hinting
-						track = find_sync(track)
+						track = analyze_sync(track)
 						track = find_repeats(track)
 					track['processing_time'] = time.clock() - track_start_clock
 					track_status(track)
 					tracks.append(track)
 			else:
 				break
+			# This does not even consider the possibility that the EDD file is not at quarter track resolution.
+			# Maybe someday this can be a parameter, but I'll get it working on quarter tracks first.
 			current_track += 0.25
 
 		if options['write_nib']:
 			write_nib_file(eddfile, tracks)
+		if options['write_v2d']:
+			write_v2d_file(eddfile, tracks)
 		if options['write_dsk'] or options['write_po']:
 			write_dsk_file(eddfile, tracks)
 		if options['write_fdi']:
@@ -190,7 +220,7 @@ def track_status(track):
 def message(message, level=0, end='\n'):
 	'''Output messages to the screen and to the log file if requested'''
 	global options
-	if level == 0 or (level == 1 and options['verbose']) or (level == 2) and options['werbose']:
+	if level == 0 or (level == 1 and options['verbose']) or (level == 2 and options['werbose']):
 		for output in options['console']:
 			print(message, file=output, end=end)
 
@@ -218,14 +248,17 @@ Options:
  -n, --nib     Write .nib file (for 13-sectors and light protection)
  -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
  -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
+ -5, --v2d     Write .v2d file (D5NI, quarter tracked nibbles, ok in Virtual II/STM)
  -l, --log     Write .log file of conversion output
  -v, --verbose Be more verbose than usual
  -w, --werbose Be way, way (ponponpon) more verbose than usual (implies -v)
 
  Examples:
  defedd.py -d eddfile.edd (write a dsk file, standard 16-sector format)
- defedd.py -qaf eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
+ defedd.py -faq eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
  	(works for Choplifter)
+ defedd.py -qv eddfile.edd (write a v2d file for Virtual II)
+ 	(works for ??)
  defedd.py -qn eddfile.edd (write a nib file, skip sector analysis)
  	(works for 16-sector disks, not stress tested yet)
  defedd.py -fk eddfile.edd (write small fdi file for OE, don't fix bit slips)
@@ -258,6 +291,58 @@ def write_nib_file(eddfile, tracks):
 				else:
 					nibfile.write((track['nibbles'])[:0x1a00])
 
+def write_v2d_file(eddfile, tracks):
+	'''Write the data out in the form of a half-tracked v2d/d5ni file'''
+	global options
+	# This in principle can store variable numbers of nibbles per track.
+	# Right now the computation of number of nibbles is not done very well, really.
+	# requires a track analysis.  For the moment, I'll just store the first 1a00 nibbles on each track.
+	# In Virtual II, it seems only to accept half (not quarter) tracks.
+	# I think it is possible to not even have enough nibbles found for even 1a00, in which case, write fewer.
+	with open(options['v2dfilename'], mode="wb") as v2dfile:
+		# precompute the lengths so we can get the filesize
+		# nibs_to_write = 13312 # cheat massively - VII rejects this
+		# nibs_to_write = 7400 # cheat -- this is about as big as I've seen VII accept
+		nibs_to_write = 7168 # cheat -- 1c00
+		# nibs_to_write = 6656 # 1a00 - standard for nib
+		filesize = 0
+		num_tracks = 0
+		for track in tracks:
+			quarter_track = int(4 * track['track_number'])
+			phase = quarter_track % 4
+			if phase == 0 or phase == 2:
+				if len(track['nibbles']) < nibs_to_write:
+					filesize += len(track['nibbles'])
+				else:
+					filesize += nibs_to_write
+				# and four bytes for the track header
+				filesize += 4
+				if len(track['nibbles']) > 0:
+					# is it even possible to have zero nibbles, e.g., on an unformatted track?  All zeros?
+					# Just in case, catch it I guess.  At some point, actually check to see if it ever happens
+					num_tracks += 1
+		# write the d5ni/v2d header
+		# filesize = len(tracks) * (nibs_to_write + 4) # (1a00 + 4) * tracks
+		v2dfile.write(struct.pack('>I', filesize)) # size of whole file
+		v2dfile.write(b"D5NI") #signature
+		v2dfile.write(struct.pack('>H', num_tracks)) # number of tracks
+		for track in tracks:
+			quarter_track = int(4 * track['track_number'])
+			phase = quarter_track % 4
+			if phase == 0 or phase == 2:
+				if len(track['nibbles']) > 0:
+					# assuming there are some nibbles (otherwise, skip the track)
+					# write the track header
+					v2dfile.write(struct.pack('>H', int(4 * track['track_number']))) # quarter track index
+					if len(track['nibbles']) < nibs_to_write:
+						# if we don't have enough nibbles around to write, then cut the track back
+						v2dfile.write(struct.pack('>H', len(track['nibbles']))) # bytes in this track
+					else:
+						v2dfile.write(struct.pack('>H', nibs_to_write)) # bytes in this track
+					# TODO: Maybe try to use sync_nibstart like .nib writing does.  Not now, though.
+					# This should write as many nibbles as we have, if it is fewer than nibs_to_write
+					v2dfile.write((track['nibbles'])[:nibs_to_write])
+
 def write_fdi_file(eddfile, tracks):
 	'''Write the data out in the form of an FDI file'''
 	global options
@@ -281,7 +366,7 @@ def write_fdi_file(eddfile, tracks):
 		fdifile.write(b"\x00\x00") #reserved
 		for track in tracks:
 			phase = (4 * track['track_number']) % 4
-			if options['process_fractional'] or phase == 0:
+			if options['process_quarter'] or phase == 0 or (options['process_halves'] and phase == 2):
 				fdifile.write(b"\xd2") # raw GCR
 				if track['data_bits'] == 0:
 					# treat track as unformatted (so we don't even have the 8 header bits)
@@ -290,11 +375,11 @@ def write_fdi_file(eddfile, tracks):
 					track['fdi_write_length'] = 8 + len(track['fdi_bytes'])
 					track['fdi_page_length'] = math.ceil(track['fdi_write_length'] / 256)
 					fdifile.write(bytes([track['fdi_page_length']]))
-			if phase == 0 and not options['process_fractional']:
+			if phase == 0 and not options['process_quarter']:
 				# write zeros for lengths of quarter tracks
 				fdifile.write(b'\x00\x00\x00\x00\x00\x00')
 		# Write out enough zeros after the track data to get us to a page boundary
-		if options['process_fractional']:
+		if options['process_quarter']:
 			tracks_written = len(tracks)
 		else:
 			tracks_written = 4 * len(tracks)
@@ -307,7 +392,7 @@ def write_fdi_file(eddfile, tracks):
 		for track in tracks:
 			track_index = track['track_number'] * 4
 			phase = track_index % 4
-			if options['process_fractional'] or phase == 0:
+			if options['process_quarter'] or phase == 0:
 				if track['data_bits'] > 0:
 					fdifile.write(struct.pack('>L', track['data_bits']))
 					fdifile.write(struct.pack('>L', track['index_offset']))
@@ -417,35 +502,63 @@ def bytes_to_bits(eddbuffer):
 
 def nibblize(bits):
 	'''Convert track bits into nibbles by emulating the Disk II controller'''
+	# The basic operation of this is just emulating the sequencer
+	# Generally, accumulate bits until high bit gets set, record that as a nibble,
+	# and then wait for the next 1 to start accumulating data again.
+	# This allows for auto-sync by writing FF then zeros, then FF, then zeros.
+	# That reads as a sequence of FFs (eventually) and leaves the sequencer ready
+	# to start reading regular 8-bit nibbles in the same place.
+	# We will also keep track of "long nibbles" (sync nibbles, unless it's part of a protection).
+	# Elsewhere these will get analyzed to try to determine the track length in bits.
+	# What comes out of this is a structure with:
+	# nibbles being the array of actual nibbles read
+	# offsets being a corresponding array that indicates which bit in the bitstream ended the nibble
+	# nits being a corresponding array that indicates how many extra leading zeros there were
+	# sync_regions is an array of regions where long nibbles were found, each member being a vector
+	#	with [number of sequential long nibbles, offset of first one, offset of last one]
 	nibbles = bytearray()
 	offsets = []
-	nibbits = []
 	nits = []
+	sync_regions = []
 	offset = 0
-	nibblebits = ""
+	sync_start = 0
+	sync_run = 0
+	leading_zeros = 0
 	data_register = 0
 	wait_for_one = True
 	for bit in bits:
 		if bit == 1:
-			nibblebits += "1"
 			data_register = (data_register << 1) + 1
 			wait_for_one = False
 		else:
 			if wait_for_one:
-				nibblebits += "-"
+				leading_zeros += 1
 			else:
-				nibblebits += "0"
 				data_register = data_register << 1
 		if data_register > 127:
 			wait_for_one = True
 			nibbles.append(data_register)
-			offsets.append(offset)
-			nibbits.append(nibblebits)
-			nits.append(len(nibblebits))
-			nibblebits = ""
+			offsets.append(offset) # offset represents the index into bits when nibble was complete
+			nits.append(leading_zeros)
+			if leading_zeros > 0:
+				# this was a long nibble, a sync byte or something more devious.
+				# if it's the first one, start recording this as a region
+				if sync_start == 0:
+					sync_start = offset
+					sync_run = 0
+				else:
+					# and if it is continuing in a region we already opened, keep track of the number of nibbles
+					sync_run += 1
+			else:
+				# this is a regular sized nibble, but if we were recording a sync region, close it
+				if sync_start > 0:
+					sync_regions.append([sync_run, sync_start, offset])
+					sync_start = 0
+					sync_run = 0
+			leading_zeros = 0
 			data_register = 0
 		offset += 1
-	return {'nibbles': nibbles, 'offsets': offsets, 'nibbits': nibbits, 'nits': nits}
+	return {'nibbles': nibbles, 'offsets': offsets, 'nits': nits, 'sync_regions': sync_regions}
 
 # This is primarily for the purpose of creating dsk images
 # Also useful for getting an estimate of track length.
@@ -776,45 +889,27 @@ def check_match(needlebits, haystackbits):
 			score -= 20
 	return (score > 20)
 
-def find_sync(track):
+def analyze_sync(track):
 	'''Find regions of sync bits on a track'''
 	global options
-	# A syncing region is essentially defined by a series of FFs from the sequencer.
-	# We should already have this information from the nibbles
-	# So, whether standard sectors were sought or not, I can still look for streams of FFs.
-	# The assumption made here (not entirely valid) is that the longest sync stream will be
-	# at the end of a track. 
-	# Note, though, I don't think FF is the only nibble that can be used to sync, and I
-	# suspect that some track arcing schemes may not use sync on each track
-	# (that is, they can sync on one track and then arc into another maintaining sync)
-	runs_sequential = []
-	current_run = 0
-	nibbles = track['nibbles']
-	nits = track['nits']
-	offsets = track['offsets']
-	prev_nib_offset = 0
-	for offset in range(len(nibbles)):
-		# FF sync will obviously have slurped up more than 8 bits, usually 10.
-		# Try looking not for FFs but just for long nibbles.
-		if nits[offset] > 8:
-			current_run += 1
-		else:
-			# Try to skip over syncs within a sector
-			if current_run > 5:
-				runs_sequential.append([current_run, offsets[offset], offset])
-			current_run = 0
-	# sort runs by size so we can find the top two
-	runs = sorted(runs_sequential, key=lambda run: run[0], reverse=True)
-	track['sync_runs_sequential'] = runs_sequential
-	track['sync_runs'] = runs
-	if options['werbose']:
-		message('Sync spans found, in decreasing lengths:', 2)
+	# sync regions will have already been gathered during nibblize.
+	# This will go through those and try to use them to guess the track size.
+	# sort the runs by size descending so we can start looking at the longest ones.
+	sorted_sync_regions = sorted(track['sync_regions'], key=lambda run: run[0], reverse=True)
+	# For the moment I'm recording this in the track, but I don't know if it's of any use outside.
+	# Maybe for display.  I could take this out and save a couple cycles and some memory if it's useless.
+	track['sorted_sync_regions'] = sorted_sync_regions
+	# For the moment, display the regions we found so that I can eyeball it and try to determine a good algorithm
+	if options['verbose']:
+		message('These are the "sync spans" found, in decreasing lengths.  Grouped by length, with end offset, distance, then start.', 2)
 		prev_nib_offset = 0
 		prev_bit_offset = 0
-		prev_run = 999999
+		prev_run = 999999 # guarantees that the first run printed will generate a label
 		columns = 0
-		for run in runs:
+		for run in sorted_sync_regions:
+			# group runs of the same length together.
 			if prev_run > run[0]:
+				# this length is different, so new label line.
 				message('', 2)
 				message('{:4d}: '.format(run[0]), 2, end='')
 			message('{:5d} {:5d} {:6d} {:6d} / '.format(\
@@ -832,9 +927,42 @@ def find_sync(track):
 			prev_bit_offset = run[1]
 			prev_run = run[0]
 		message('', 2)
-	# top two will almost certainly be exactly a track apart
-	# if of the usual sort.  Need to be nearly the same and over 90+ sync nibbles to count here
-	# and of course there need to be at least two sync runs, and even less than three is dangerous
+	# Try to analyze what we got at the top.  If there's a particularly long sync run, we should have picked it
+	# up at least twice, ending one track apart.  It might have been picked up three times.
+	# So first check for that.
+	if len(sorted_sync_regions) > 2:
+		# so long as there are at least multiple sync regions.
+		# we want to check 1 and 2, 1 and 3, and 2 and 3.
+		for syncs in [[0,1], [0,2], [1,2]]:
+			first = sorted_sync_regions[syncs[0]]
+			second = sorted_sync_regions[syncs[1]]
+			# are they close enough in terms of how long the sync spans are (within 3)?
+			if abs(first[0] - second[0]) < 3:
+				# yes, so do they end about a track apart?
+				# get them in the right order and check.
+				sync_needle = first[2]
+				if second[2] < sync_needle:
+					sync_needle = second[2]
+					sync_haystack = first[2]
+				else:
+					sync_haystack = second[2]
+				# are they about a track apart?
+				if 50500 < (sync_haystack - sync_needle) < 52500:
+					# yes, they are about a track apart
+					# so mark this as the cut point and return
+					track['sync_needle'] = sync_needle
+					track['sync_haystack'] = sync_haystack
+					# nibbles should start just after the needle
+					track['sync_nibstart'] = sync_needle + 1
+					return track
+	else:
+		message('Not enough sync regions to even work with here.')
+	# If the easy guess (using the top three sync regions) did not work, then we could get into some
+	# more complex stuff to try to work this out.
+	# This has not seemed very reliable so far, so for the moment, I'll bail out early so I can eyeball it.
+	if True:
+		return track
+	# never gets here, yet.
 	if len(runs) > 1:
 		if abs((runs[0])[0] - (runs[1])[0]) < 3 and (runs[0])[0] > 90:
 			sync_haystack = (runs[1])[1]
@@ -868,6 +996,24 @@ def set_track_points_to_sync(track):
 	'''Use track sync information to set the needle and haystack values'''
 	global options
 	global three_ones
+	# Initially, I had this backing up by sync regions.  This may be too complex.
+	# Right now, I'm going to try just backing up absolutely how far is necessary.
+	sync_needle = track['sync_needle']
+	sync_haystack = track['sync_haystack']
+	sync_length = sync_haystack - sync_needle
+	bit_length = len(track['bits'])
+	retreat = 8 + sync_haystack + sync_length - bit_length
+	if retreat > 0:
+		# haystack runs off the end of the bits
+		# so back needle and haystack up such that they will fit
+		sync_needle -= retreat
+		sync_haystack -= retreat
+	# save them as the definitive start points for the track and its second copy
+	track['match_needle'] = sync_needle
+	track['match_haystack'] = sync_haystack
+	track['match_bits'] = 0
+	return track	
+	# The rest of this will not execute for now, it is the more complex version.
 	bits = track['bits']
 	bit_length = len(bits)
 	# A prior computation should have already found the syncs if we got here.
@@ -879,7 +1025,7 @@ def set_track_points_to_sync(track):
 	sync_haystack = track['sync_haystack']
 	# if we have to back up, back up by sync runs until we're in range
 	# locate the positions of the major sync boundary in the sync runs list
-	sync_offsets = [x[1] for x in track['sync_runs_sequential']]
+	sync_offsets = [x[1] for x in track['sync_regions']]
 	sync_needle_index = sync_offsets.index(sync_needle)
 	sync_haystack_index = sync_offsets.index(sync_haystack)
 	while sync_haystack + 52500 > bit_length:
@@ -1107,6 +1253,10 @@ def repair_bitstream(track):
 			track['match_haystack'] + track['data_bits'], track['data_bits'], len(track['bits'])), 1)
 		needle_bits = bits[track['match_needle']:track['match_haystack']]
 		haystack_bits = bits[track['match_haystack']: track['match_haystack'] + track['data_bits']]
+		message('The first bunch of bits are as follows:', 1)
+		message(needle_bits[0:30], 1)
+		message(haystack_bits[0:30], 1)
+		# message('{:08b}'.format(haystack_bits[0:20]), 1)
 		bit_offset = 0
 		perfect_match = True
 		verify_size = 4
