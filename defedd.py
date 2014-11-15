@@ -28,11 +28,13 @@ import time
 
 
 # options will be stored globally for retrievability
-options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 'write_log': False,
-		'process_quarter': True, 'analyze_sectors': True, 'write_full': False, 'no_translation': False,
-		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'repair_tracks': True, 'use_second': False,
-		'use_slice': False, 'from_zero': False, 'write_protect': False, 'write_po': False, 'write_v2d': False,
-		'process_halves': True}
+options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 
+		'write_po': False, 'write_v2d': False, 'write_nit': False, 'write_protect': False, 
+		'process_quarters': True, 'process_halves': True, 'analyze_sectors': True,
+		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'write_log': False,
+		'write_full': False, 'no_translation': False,
+		'repair_tracks': True, 'use_second': False,
+		'use_slice': False, 'from_zero': False, 'spiral': False}
 
 def main(argv=None):
 	'''Main entry point'''
@@ -41,8 +43,10 @@ def main(argv=None):
 	print("defedd - analyze and convert EDD files.")
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hnd1fmqacvwlk20spx5", \
-			["nib", "dsk", "fdi", "mfi", "int", "quick", "cheat", "all", "verbose", "werbose", "log", "keep", "second", "zero", "slice", "po", "protect", "v2d"])
+		opts, args = getopt.getopt(sys.argv[1:], "hndfmp5txl1qcak20srvw", \
+			["help", "nib", "dsk", "fdi", "mfi", "po", "v2d", "nit", "protect", "log",
+				"int", "quick", "cheat", "all", "keep", "second", "zero", "slice", "spiral",
+				"verbose", "werbose"])
 	except getopt.GetoptError as err:
 		print(str(err))
 		usage()
@@ -63,17 +67,24 @@ def main(argv=None):
 		elif o == "-n" or o == "--nib":
 			options['write_nib'] = True
 			print("Will save nib file.")
+		elif o == "-t" or o == "--nit":
+			options['write_nit'] = True
+			print("Will save nit (nibble timing) file.")
 		elif o == "-d" or o == "--dsk":
 			options['write_dsk'] = True
-			print("Will save dsk file.")
+			print("Will save dsk file (DOS 3.3 order, a.k.a. .do).")
 		elif o == "-p" or o == "--po":
 			options['write_po'] = True
 			print("Will save ProDOS-ordered po (dsk-like) file.")
+		elif o == "-x" or o == "--protect":
+			options['write_protect'] = True
+			print("Will write image as write-protected if supported (FDI)")
 		elif o == "-l" or o == "--log":
 			options['write_log'] = True
 			print("Will save log file.")
 		elif o == "-1" or o == "--int":
-			options['process_quarter'] = False
+			options['process_quarters'] = False
+			options['process_halves'] = False
 			print("Will process only whole tracks.")
 		elif o == "-q" or o == "--quick":
 			options['analyze_sectors'] = False
@@ -93,12 +104,12 @@ def main(argv=None):
 		elif o == "-0" or o == "--zero":
 			options['from_zero'] = True
 			print("Will write track-length bits starting from beginning of EDD sample for all tracks.")
+		elif o == "-r" or o == "--spiral":
+			options['spiral'] = True
+			print("Will write EDD bits starting from a spiraling start.")
 		elif o == "-s" or o == "--slice":
 			options['use_slice'] = True
 			print("Will write track-length bits starting from beginning of EDD sample for unparseable tracks")
-		elif o == "-x" or o == "--protect":
-			options['write_protect'] = True
-			print("Will write image as write protected if supported (FDI)")
 		elif o == "-v" or o == "--verbose":
 			options['verbose'] = True
 			print("Will be more chatty about progress than usual.")
@@ -121,9 +132,10 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 	except:
 		print('You need to provide the name of an EDD file to begin.')
 		return 1
-	options['nibfilename'] = eddfilename + ".nib"
-	options['dskfilename'] = eddfilename + ".dsk"
 	options['pofilename'] = eddfilename + ".po"
+	options['nibfilename'] = eddfilename + ".nib"
+	options['nitfilename'] = eddfilename + ".nit"
+	options['dskfilename'] = eddfilename + ".dsk"
 	options['mfifilename'] = eddfilename + ".mfi"
 	options['fdifilename'] = eddfilename + ".fdi"
 	options['v2dfilename'] = eddfilename + ".v2d"
@@ -131,8 +143,8 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 
 	# Do some sanity checking
 	# TODO: Improve the style of the quarter/half/whole track decisionmaking here
-	if options['process_quarter'] and not options['write_mfi'] and not options['write_fdi']:
-		options['process_quarter'] = False
+	if options['process_quarters'] and not options['write_mfi'] and not options['write_fdi']:
+		options['process_quarters'] = False
 		if options['process_halves'] and not options['write_v2d']:
 			print('Only processing whole tracks, no sense in processing quarter tracks unless they will be stored.')
 			options['process_halves'] = False
@@ -153,14 +165,14 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 		current_track = 0.0
 		# Loop through the tracks
 		while True:
-			# Keep track of how long the track takes, helpful in trying to tighten the analysis loops
+			# Keep track of how long the track takes, helpful (to me) in trying to tighten the analysis loops
 			track_start_clock = time.clock()
 			eddbuffer = eddfile.read(16384)
-			# Analyze so long as we haven't run off the end of the file.
+			# Keep going so long as we haven't run off the end of the file.
 			if eddbuffer:
 				# Skip over this data if it's not a whole track and only care about whole tracks
 				phase = (4 * current_track) % 4
-				if phase == 0 or options['process_quarter'] or (phase == 2 and options['process_halves']):
+				if phase == 0 or options['process_quarters'] or (phase == 2 and options['process_halves']):
 					# track is the data structure we are storing all the accumulated information in.
 					track = {'track_number': current_track}
 					track['index_offset'] = 0 # bit position of the index pulse
@@ -233,23 +245,28 @@ Assumption is that the EDD file was produced by I'm fEDD Up.
 Quarter tracks.
 
 Options:
- -h, --help    You're looking at it.
+Output formats:
+ -d, --dsk     Write .dsk file (data-only 16-sector standard images)
+ -p, --po      Write .po file (data-only, 16-sector ProDOS ordered images)
+ -n, --nib     Write .nib file (for 13-sectors and light protection)
+ -t, --nit     Write .nit file (for debugging / checking against I'm fEDD Up)
+ -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
+ -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
+ -5, --v2d     Write .v2d file (D5NI, half tracked nibbles, ok in Virtual II/STM)
+ -l, --log     Write .log file of conversion output
+ -x, --protect Write protect the disk image if supported (fdi)
+Analysis options:
  -q, --quick   Skip standard sector analysis, ok for fdi/mfi/nib
  -1, --int     Consider only whole tracks (not quarter tracks)
  -c, --cheat   Write full 2.5x bit read for unparseable tracks (vs. unformatted)
  -a, --all     Write full 2.5x bit read for all tracks (i.e. cheat everywhere)
  -s, --slice   Write EDD bits to track length for unparseable tracks (cheat lite)
  -0, --zero    Write EDD bits from 0 instead of found track (slice for formatted)
+ -r, --spiral  Write EDD bits in 17000-bit spiral to try to keep track sync
  -k, --keep    Do not attempt to repair bitstream
  -2, --second  Use second track repeat if choice is needed (default is first)
- -p, --protect Write protect the disk image if supported (fdi)
- -d, --dsk     Write .dsk file (data-only 16-sector standard images)
- -p, --po      Write .po file (data-only, 16-sector ProDOS ordered images)
- -n, --nib     Write .nib file (for 13-sectors and light protection)
- -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
- -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
- -5, --v2d     Write .v2d file (D5NI, quarter tracked nibbles, ok in Virtual II/STM)
- -l, --log     Write .log file of conversion output
+Help and debugging:
+ -h, --help    You're looking at it.
  -v, --verbose Be more verbose than usual
  -w, --werbose Be way, way (ponponpon) more verbose than usual (implies -v)
 
@@ -258,7 +275,7 @@ Options:
  defedd.py -faq eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
  	(works for Choplifter)
  defedd.py -qv eddfile.edd (write a v2d file for Virtual II)
- 	(works for ??)
+ 	(works for standard disks so far)
  defedd.py -qn eddfile.edd (write a nib file, skip sector analysis)
  	(works for 16-sector disks, not stress tested yet)
  defedd.py -fk eddfile.edd (write small fdi file for OE, don't fix bit slips)
@@ -277,7 +294,7 @@ def write_dsk_file(eddfile, tracks):
 	with open(outfile, mode="wb") as dskfile:
 		for track in tracks:
 			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
-				dskfile.write(track['track_bytes'])
+				dskfile.write(track['dsk_bytes'])
 
 def write_nib_file(eddfile, tracks):
 	'''Write the data out in the form of a 34-track nib file'''
@@ -290,6 +307,21 @@ def write_nib_file(eddfile, tracks):
 					nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
 				else:
 					nibfile.write((track['nibbles'])[:0x1a00])
+
+def write_nib_file(eddfile, tracks):
+	'''Write the nibble timing data out in the form of a (quarter tracked) nit file'''
+	# nit files from I'm fEDD Up include all tracks analyzed, not just whole tracks
+	# This is not going to be very useful for debugging unless the nib also matches I'm fEDD Up's nib
+	# and actually it might not if we're starting inside the track.  So, I added this, but it might
+	# be worth taking out again.  Can't tell if I'll ever use it.  Just curious.
+	global options
+	with open(options['nitfilename'], mode="wb") as nibfile:
+		for track in tracks:
+			if 'sync_nibstart' in track:
+				sync_nibstart = track['sync_nibstart']
+				nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
+			else:
+				nibfile.write((track['nibbles'])[:0x1a00])
 
 def write_v2d_file(eddfile, tracks):
 	'''Write the data out in the form of a half-tracked v2d/d5ni file'''
@@ -366,7 +398,7 @@ def write_fdi_file(eddfile, tracks):
 		fdifile.write(b"\x00\x00") #reserved
 		for track in tracks:
 			phase = (4 * track['track_number']) % 4
-			if options['process_quarter'] or phase == 0 or (options['process_halves'] and phase == 2):
+			if options['process_quarters'] or phase == 0 or (options['process_halves'] and phase == 2):
 				fdifile.write(b"\xd2") # raw GCR
 				if track['data_bits'] == 0:
 					# treat track as unformatted (so we don't even have the 8 header bits)
@@ -375,11 +407,11 @@ def write_fdi_file(eddfile, tracks):
 					track['fdi_write_length'] = 8 + len(track['fdi_bytes'])
 					track['fdi_page_length'] = math.ceil(track['fdi_write_length'] / 256)
 					fdifile.write(bytes([track['fdi_page_length']]))
-			if phase == 0 and not options['process_quarter']:
+			if phase == 0 and not options['process_quarters']:
 				# write zeros for lengths of quarter tracks
 				fdifile.write(b'\x00\x00\x00\x00\x00\x00')
 		# Write out enough zeros after the track data to get us to a page boundary
-		if options['process_quarter']:
+		if options['process_quarters']:
 			tracks_written = len(tracks)
 		else:
 			tracks_written = 4 * len(tracks)
@@ -392,7 +424,7 @@ def write_fdi_file(eddfile, tracks):
 		for track in tracks:
 			track_index = track['track_number'] * 4
 			phase = track_index % 4
-			if options['process_quarter'] or phase == 0:
+			if options['process_quarters'] or phase == 0:
 				if track['data_bits'] > 0:
 					fdifile.write(struct.pack('>L', track['data_bits']))
 					fdifile.write(struct.pack('>L', track['index_offset']))
@@ -514,6 +546,7 @@ def nibblize(bits):
 	# nibbles being the array of actual nibbles read
 	# offsets being a corresponding array that indicates which bit in the bitstream ended the nibble
 	# nits being a corresponding array that indicates how many extra leading zeros there were
+	#  (this should correspond to the .nit file that I'm fEDD Up produces)
 	# sync_regions is an array of regions where long nibbles were found, each member being a vector
 	#	with [number of sequential long nibbles, offset of first one, offset of last one]
 	nibbles = bytearray()
@@ -572,6 +605,7 @@ def locate_sectors(track):
 	# A sector with minimal information (used if we find a data mark without an address mark)
 	zero_sector = {'dos32': False, 'addr_checksum_ok': False}
 	message('Scanning track for address and data marks.', 2)
+	message('offset ADDR: vol track sector 13/16 ; ADDR/DATA: CHK=addr checksum error, ok=addr epilogue ok ', 2)
 	# TODO: Keep track of the gaps and optimal beginning of the nibble stream for nib writing.
 	# Skip the last 420 nibbles since they cannot contain a sector and this would be their third read anyway
 	stop_scan = len(track['nibbles']) - 420
@@ -582,8 +616,9 @@ def locate_sectors(track):
 	while offset < stop_scan:
 		nibfield = (track['nibbles'])[offset : offset + 14]
 		if nibfield[0:3] in [bytearray(b'\xd5\xaa\x96'), bytearray(b'\xd5\xaa\xb5')]:
+			# we found an address mark (d5aa96 for 16-sector, d5aab5 for 13-sector)
 			sector = {
-			'dos32': (nibfield[2] == 0xb5),
+			'dos32': (nibfield[2] == 0xb5), # true if it was 13-sector
 			'offset': offset,
 			'vol': ((nibfield[3] << 1)+1) & nibfield[4], 
 			'track': ((nibfield[5] << 1)+1) & nibfield[6], 
@@ -593,12 +628,14 @@ def locate_sectors(track):
 			'addr_epilogue': nibfield[11:14]
 			}
 			sector['addr_checksum_ok'] = (sector['addr_checksum'] == (sector['vol'] ^ sector['track'] ^ sector['sector']))
+			# epilogue is not always completely written, if we have the first two nibbles it's good enough
 			sector['addr_epilogue_ok'] = (sector['addr_epilogue'][0:2] == bytearray(b'\xde\xaa'))
+			# but a gold star if all three were written
 			sector['addr_epilogue_perfect'] = (sector['addr_epilogue'][0:3] == bytearray(b'\xde\xaa\xeb'))
 			all_sectors.append(sector)
 			gap = bytearray()
 			if awaiting_data:
-				# If we have gotten two address fields in a row, send a linebreak
+				# If we have gotten two address fields in a row, send a linebreak to the console
 				message('', 2)
 			message('{:6d} ADDR: {:02x} {:02x} {:02x} {} {} {}{}  '.format( \
 				sector['offset'], sector['vol'], sector['track'], sector['sector'], \
@@ -612,7 +649,7 @@ def locate_sectors(track):
 			offset += 14
 			# next thing we expect is a data field
 			awaiting_data = True
-		elif nibfield[0:3] == bytearray(b'\xd5\xaa\xad'): # data mark
+		elif nibfield[0:3] == bytearray(b'\xd5\xaa\xad'): # data mark (for both standard 13- and 16-sector formats)
 			# this is presumed to be the data mark on the last pushed sector
 			if awaiting_data:
 				sector = all_sectors.pop()
@@ -643,12 +680,12 @@ def locate_sectors(track):
 				), 2)
 			offset += 6 + data_length
 		else:
-			# Keep track of the building gap between marks we find
+			# Keep track of the nibbles in the gap between marks we find
 			gap.append(track['nibbles'][offset])
 			offset += 1
 	track['all_sectors'] = all_sectors
 	if awaiting_data:
-		# if we ended after an address without data, print a linebreak
+		# if we ended after an address without data, print a linebreak to the console
 		message('', 2)
 	return track
 
@@ -681,14 +718,19 @@ def consolidate_sectors(track):
 	prodos_mode = options['write_po']
 	if options['werbose']:
 		message('Consolidating found sectors by reported sector number and checking data integrity.')
+	# collect in an array keyed by self-reported sector number, for all addresses with a proper checksum.
 	for found_sector in track['all_sectors']:
 		if found_sector['addr_checksum_ok']:
+			# for now, just saving the sectors that had an ok address checksum.
 			# if any sector is in DOS 3.2 mode, presume the whole track is
+			# this is actually wildly unsafe, since some early disks can boot in either 13- or 16-sector mode
 			if found_sector['dos32']:
 				dos32_mode = True
 			try:
+				# keep all copies of the sector that we find, in case we want to compare them
 				sorted_sectors[found_sector['sector']].append(found_sector)
 			except:
+				# didn't have a copy before, this is the first time we found this sector
 				sorted_sectors[found_sector['sector']] = [found_sector]
 	# look for the bit distance between copies.
 	# This will be useful in guessing the track length in the repeat scan.
@@ -703,21 +745,27 @@ def consolidate_sectors(track):
 		base_copy = None
 		for copy in sorted_sectors[sector_number]:
 			if base_copy:
-				# if copy['data'] and not base_copy['data'] == copy['data']:
-				# 	print('Data mismatch between copies of sector ' + str(sector_number))
-				# bit_distance = 8 * (copy['offset'] - base_copy['offset'])
+				# offset is where the beginning of the address mark for the sector was found
 				bit_distance = ((track['offsets'])[copy['offset']] - (track['offsets'])[base_copy['offset']])
+				# since they should be stacked in ascending order, even if there are three copies
+				# of this sector, the closest one should be found first
 				if bit_distance < predicted_track_bits:
 					predicted_track_bits = bit_distance
 			else:
+				# first copy we find is the one we will compare to
 				base_copy = copy
 	# If we found a reasonable number of predicted track bits, store for use in repeat scan
+	# If it is outside this window either a) there were two copies of this sector on the track, or
+	# b) we missed one of them.
 	if 50000 > predicted_track_bits > 53000:
 		track['predicted_track_bits'] = 50000
-	if options['werbose']:
+	# report the results
+	# only bother doing this loop if we'll be able to see it (verbose), to save cycles
+	if options['verbose'] and len(sorted_sectors) > 0:
+		message('After consolidating: (self-id track) DCHK data checksum err, DATA data mismatch err, offset, bit distance twixt copies', 1)
 		for sector_number in sorted_sectors.keys():
 			data = False
-			message('Sec {:0x}: '.format(sector_number), 2, end='')
+			message('Sec {:0x}: '.format(sector_number), 1, end='')
 			for sector in sorted_sectors[sector_number]:
 				if data:
 					data_match = True if 'data' in sector and sector['data'] == data else False
@@ -727,16 +775,20 @@ def consolidate_sectors(track):
 					bit_distance = 0
 					data_match = True
 				offset = sector['offset']
-				message('{} {} {} {:5d} {:5d} /'.format( \
-					'    ' if 'addr_checksum_ok' in sector and sector['addr_checksum_ok'] else 'ACHK', \
+				# it is impossible to have a bad address checksum because it wouldn't have been stored
+				# message('{} {} {} {:5d} {:5d} /'.format( \
+				# 	'    ' if 'addr_checksum_ok' in sector and sector['addr_checksum_ok'] else 'ACHK', \
+				message('({:0x}) {} {} {:5d} {:5d} /'.format( \
+					sector['track'],
 					'    ' if 'data_checksum_ok' in sector and sector['data_checksum_ok'] else 'DCHK', \
 					'    ' if data_match else 'DATA', \
 					sector['offset'], bit_distance
-					), 2, end='')
-			message('', 2)
-	# For now, I will just take the first valid one found
-	track_bytes = bytearray()
-	track_ok = True
+					), 1, end='')
+			message('', 1)
+	# Gather the track data for .dsk and .po images, taking the first valid one (data checksum ok) of first two
+	dsk_bytes = bytearray()
+	track_error = False
+	message('Creating the .dsk byte stream for the track.', 2)
 	for logical_sector in range(16):
 		# TODO: Allow for CP/M, Pascal, ProDOS skewing as well at some point
 		if dos32_mode:
@@ -748,14 +800,30 @@ def consolidate_sectors(track):
 		try:
 			sector = sorted_sectors[physical_sector][0]
 			if sector['data_checksum_ok']:
-				track_bytes.extend(sector['data'])
+				dsk_bytes.extend(sector['data'])
 			else:
-				track_bytes.extend(bytearray(256))
-				track_ok = False
+				# first sector was not ok, check to see if there's a second sector that is
+				try:
+					sector = sorted_sectors[physical_sector][1]
+					if sector['data_checksum_ok']:
+						# second one was ok even though first was not, so store that instead
+						dsk_bytes.extend(sector['data'])
+					else:
+						# append a sector of zeros, neither of the first two were ok
+						dsk_bytes.extend(bytearray(256))
+						track_error = True
+				except:
+					# there was no second copy and first was bad, so append a sector of zeros
+					dsk_bytes.extend(bytearray(256))
+					track_error = True
 		except:
-			track_bytes.extend(bytearray(256))
-			track_ok = False
-	track['track_bytes'] = track_bytes
+			# append a sector of zeros if we did not have this sector recorded
+			dsk_bytes.extend(bytearray(256))
+			track_error = True
+	track['dsk_bytes'] = dsk_bytes
+	# For now, just report when there was a bad track, not used anywhere
+	if track_error:
+		message('At least one sector was bad (and stuffed with zeros).', 2)
 	return track
 
 def decode_62(encoded_data):
@@ -870,7 +938,9 @@ def check_match(needlebits, haystackbits):
 	'''Check for a match between needlebits and haystackbits'''
 	global three_ones
 	# This match check will succeed if they match, but also tries to accommodate the random bits
-	# that can arise from the Disk II controller
+	# that can arise from the Disk II controller.  I believe the 5.25 controller does not have this random
+	# bits problem (spurious 1 appearing after a series of zeros due to increasing gain).
+	# Much more likely as far as I can tell is that bits can be missed (disk too fast) or doubled (disk too slow)
 	# First, if they're actually equal then we're done already
 	if needlebits == haystackbits:
 		return True
@@ -896,7 +966,7 @@ def analyze_sync(track):
 	# This will go through those and try to use them to guess the track size.
 	# sort the runs by size descending so we can start looking at the longest ones.
 	sorted_sync_regions = sorted(track['sync_regions'], key=lambda run: run[0], reverse=True)
-	# For the moment I'm recording this in the track, but I don't know if it's of any use outside.
+	# For the moment I'm saving sorted list in the track, but I don't know if it's of any use outside.
 	# Maybe for display.  I could take this out and save a couple cycles and some memory if it's useless.
 	track['sorted_sync_regions'] = sorted_sync_regions
 	# For the moment, display the regions we found so that I can eyeball it and try to determine a good algorithm
@@ -956,10 +1026,15 @@ def analyze_sync(track):
 					track['sync_nibstart'] = sync_needle + 1
 					return track
 	else:
+		# I get this sync regions message more often than I'd have guessed I would.
+		# It would seem to mean that the track was absolutely all zeros
 		message('Not enough sync regions to even work with here.')
 	# If the easy guess (using the top three sync regions) did not work, then we could get into some
 	# more complex stuff to try to work this out.
 	# This has not seemed very reliable so far, so for the moment, I'll bail out early so I can eyeball it.
+	# By hand, I can see in Jawbreaker strings of 10 syncs mostly separated by 2990 but with a 6251 and a
+	# 17931 interspersed.  So, the complex analysis should see that too, and take the distance between the
+	# spaced-out regions as the track length.
 	if True:
 		return track
 	# never gets here, yet.
@@ -1229,16 +1304,43 @@ def find_repeats(track):
 	byte_offset = track['match_needle']
 	haystack_offset = track['match_haystack']
 	if haystack_offset > 0:
-		if options['use_second']:
-			bits = track['bits'][track['match_haystack']: track['match_haystack'] + track['data_bits']]
+		if options['spiral']:
+			# advance about a third of turn into the track on each quarter track, an attempt to help sync
+			# This is actually a bit risky because it could advance past end of data window.  Particularly w/ -2.
+			# TODO: Check for that someday.
+			# Testing out on Jawbreaker (spiradisc), didn't work: 17000, 18000, 17250, 17750, 20000, 20006
+			# Jawbreaker track zero should be 51091 bits long
+			# track zero 17931-separated sync is 20007 bits later on track 0.25 read than on track 0 read.
+			# so track .25 should be shifted about 2.55ths of a track back.
+			# we have about 6.5 "shifts" of this length worth of bits available.
+			# so we shift up 20007 each time, but on the third shift, we subtract out 51091
+			# so we can shift 20007, 40014, 60021, 80028, 100035
+			# or 20007, 400014, 8930, 28937, 48944, 17860
+			# this is 20007*track - length*int(track/3)
+			# mathematically, the following works, but Jawbreaker doesn't boot.
+			quarter_track_number = int(4 * track['track_number'])
+			track_length = 51091
+			advance = 20007 * quarter_track_number - track_length*int(quarter_track_number/3)
+			message('advance is {}'.format(advance), 0)
 		else:
-			bits = track['bits'][track['match_needle']: track['match_haystack']]
+			advance = 0
+		if options['use_second']:
+			bits = track['bits'][track['match_haystack'] + advance: track['match_haystack'] + track['data_bits'] + advance]
+		else:
+			bits = track['bits'][track['match_needle'] + advance: track['match_haystack'] + advance]
 		fdi_bytes = bits_to_bytes(bits)
 	track['fdi_bytes'] = fdi_bytes
 	return track
 
 def repair_bitstream(track):
 	'''Analyze bit streams and attempt to repair bit slippage'''
+	# My impression from seeing this operate is that it is actually more likely on my setup at least
+	# for bits to be doubled rather than to slip.  I think this is probably a function of the drive
+	# speed.  It also (again observationally) seems that the later read is more likely to double a bit.
+	# So if by removing a bit from haystack we can get them to match, then prefer to do that.
+	# Though I think this is too optimistic.  It is hard to discern a pattern in the bit mismatches.
+	# Best option would be to try for a triple match and let them vote, at least for the half a track
+	# that we have a triple sample of.
 	global options
 	bits = track['bits']
 	# Analyze bit differences and report in werbose mode	
@@ -1253,15 +1355,15 @@ def repair_bitstream(track):
 			track['match_haystack'] + track['data_bits'], track['data_bits'], len(track['bits'])), 1)
 		needle_bits = bits[track['match_needle']:track['match_haystack']]
 		haystack_bits = bits[track['match_haystack']: track['match_haystack'] + track['data_bits']]
-		message('The first bunch of bits are as follows:', 1)
-		message(needle_bits[0:30], 1)
-		message(haystack_bits[0:30], 1)
-		# message('{:08b}'.format(haystack_bits[0:20]), 1)
+		# This is just a debugging message, ugly formatting
+		message('The first bunch of bits are as follows:', 2)
+		message(needle_bits[0:30], 2)
+		message(haystack_bits[0:30], 2)
 		bit_offset = 0
 		perfect_match = True
 		verify_size = 4
 		previous_offset_issue = 0
-		bit_errors = {'needle_slips': 0, 'haystack_slips': 0, 'mismatches': 0}
+		bit_errors = {'needle_slips': 0, 'haystack_slips': 0, 'mismatches': 0, 'haystack_doubles': 0}
 		while bit_offset < len(needle_bits) - 8:
 			proceed = True
 			window_end = bit_offset + 8
@@ -1282,6 +1384,25 @@ def repair_bitstream(track):
 					while eor_byte < 128:
 						eor_byte = eor_byte << 1
 						mismatch_index += 1
+					if False:
+						# Skip this for now, only started working on it, not convinced this approach is better.
+						# Did haystack have a doubled bit?
+						# Try removing mismatched bit from haystack and see if this and next byte match now
+						needle_patch = needle_bits[bit_offset: double_window]
+						haystack_patch = haystack_bits[bit_offset: double_window + 1]
+						del haystack_patch[mismatch_index]
+						if needle_patch == haystack_patch:
+							# that solved it, haystack doubled the bit
+							# remove the bit from haystack for good
+							del haystack_bits[bit_offset + mismatch_index]
+							note = 'Haystack doubled a bit'
+							bit_errors['haystack_doubles'] += 1
+							proceed = False
+						# else:
+						# 	# That didn't solve it, but maybe 
+					# Below is what I was doing initially, which is inserting a bit or two preferentially into needle.
+					# It also checks for two bits in a row, but that is highly unlikely to work except by coincidence.
+					# It seems much more likely that two bits would be mis-read in the window but not next to each other.
 					# Did needle lose a bit?  Try removing mismatch from haystack and see if this and next byte match now
 					needle_patch = needle_bits[bit_offset: double_window - 1]
 					haystack_patch = haystack_bits[bit_offset: double_window]
@@ -1295,12 +1416,12 @@ def repair_bitstream(track):
 						bit_errors['needle_slips'] += 1
 						proceed = False
 					else:
-						# Did needle lose two bits?
+						# Did needle lose two sequential bits?
 						needle_patch = needle_patch[:-1]
 						missing_bit2 = haystack_patch[mismatch_index + 1]
 						needle_patch.insert(mismatch_index + 1, missing_bit2)
 						if needle_patch == haystack_patch:
-							# that solved it, needle lost 2 bits
+							# that solved it, needle lost 2 sequential bits
 							# add them into needle for good
 							needle_bits.insert(mismatch_index + bit_offset, missing_bit2)
 							needle_bits.insert(mismatch_index + bit_offset, missing_bit)
@@ -1321,13 +1442,13 @@ def repair_bitstream(track):
 								bit_errors['haystack_slips'] += 1
 								proceed = False
 							else:
-								# ok, did haystack lose two bits?
+								# ok, did haystack lose two sequential bits?
 								haystack_patch = haystack_patch[:-1]
 								missing_bit2 = needle_patch[mismatch_index + 1]
 								haystack_patch.insert(mismatch_index + 1, missing_bit2)
 								if needle_patch == haystack_patch:
-									# that solved it, haystack lost a bit
-									# add it into haystack for good
+									# that solved it, haystack lost two sequential bits
+									# add them into haystack for good
 									haystack_bits.insert(mismatch_index + bit_offset, missing_bit2)
 									haystack_bits.insert(mismatch_index + bit_offset, missing_bit)
 									note = 'Haystack lost 2 bits'
