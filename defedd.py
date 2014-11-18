@@ -933,6 +933,33 @@ def translate_53(nibble):
 # Check for a fuzzy match between candidate copies of a track.
 # This has to be as tight as possible, this is called a lot and can really slow the program down.
 # I've done everything I can think of to save cycles and fail as fast as possible
+# In principle, once we are correctly aligned, the two things that could cause a failure to match
+# are either a) the media is corrupt, b) a single bit got read twice.
+# Of course, in a string of 1s, reading one of early 1s twice won't get detected until the string of
+# 1s ends and one of them has lasted longer.  And if the string is long enoough for this to have happened
+# twice, it might not even be off by just one.  Though I imagine that is fairly rare. 
+# The way this routine works right now, it is simply looking for a statistically high match between the
+# bits, without any attempt to be smart about it.
+# Ideally, once it hits a mismatch, we have a 1 and a 0 and in the situation where the media is fine,
+# that means one of the two double-sampled a bit somewhere recently, possibly right there.
+# 01001001 01010011 <- looks like the needle has two samples of the second 0, mismatches at bit 3.
+# So, at the mismatch (bit 3), look at previous bit.  If it is the same, and if next 4 bits match by
+# doing so, safe-ish bet.  Delete and continue on.
+# 01000010 01000001 <- one of the zeros was double-sampled, only caught at the end, but same procedure
+# should work.
+# Ok, so I will try to implement that algorithm:
+# If there is a mismatch, don't fail immmediately, instead:
+# set patient to the bitstream (of needle, haystack) for which the mismatch bit duplicates the prior bit
+# set doctor to the other bitstream
+# see if doctor's bits from mismatch to mismatch+3 match patient's bits from mismatch+1 to mismatch+4
+# if they don't, surgery won't help, possibly a bad media problem.
+# if they do, remove mismatch bit from patient and continue checking.
+# in the event surgery would not help, just fail.  Maybe later try to diagnose localized bad media
+# by looking ahead many bits in the future and see if we're back in sync.
+# This would now be doing the "repair" work that a separate routine was tasked with before, so
+# should possibly respect the "don't repair" switch.  At the cost of more cycles.
+# And, actually, it looks like it might be possible that there is tripling.  Some of my surgeries look
+# like they'd be solved if I allowed 000 to turn into 0.  Hmm.
 three_ones = bytearray(b'\x01\x01\x01')
 def check_match(needlebits, haystackbits):
 	'''Check for a match between needlebits and haystackbits'''
@@ -943,7 +970,68 @@ def check_match(needlebits, haystackbits):
 	# Much more likely as far as I can tell is that bits can be missed (disk too fast) or doubled (disk too slow)
 	# First, if they're actually equal then we're done already
 	if needlebits == haystackbits:
+		return {'needlebits': needlebits, 'haystackbits': haystackbits}
 		return True
+	# If we can't even match the first bit, fail now.
+	if needlebits[0] != haystackbits[0]:
+		return False
+	# If this is at least long enough that we got some initial matches,
+	# start reporting the surgeries
+	report_surgery = (len(needlebits) > 1900)
+	fix_window = 3
+	for offset in range(1, len(needlebits)):
+		if offset+fix_window < len(needlebits) and offset+fix_window < len(haystackbits):
+			if not haystackbits[offset] == needlebits[offset]:
+				if haystackbits[offset-1] == haystackbits[offset]:
+					# haystack has the duplicate bit
+					if haystackbits[offset+1:offset+fix_window+1] == needlebits[offset:offset+fix_window]:
+						# surgery will bring them back in sync, so do it
+						if report_surgery:
+							message('Haystack dup {:1d}: Fixed at {:5d}'.format(haystackbits[offset], offset), 2)
+						del haystackbits[offset]
+					else:
+						# check to see if a double bitectomy would help
+						if haystackbits[offset+2:offset+fix_window+2] == needlebits[offset:offset+fix_window]:
+							# it does.  Amazing.
+							if report_surgery:
+								message('Haystack dupdup {:1d}: Fixed at {:5d}'.format(haystackbits[offset], offset), 2)
+							del haystackbits[offset]
+							del haystackbits[offset]
+						else:
+							# surgery does not help
+							# fail now
+							if report_surgery:
+								message('Haystack dup {:1d}: Surgery wont help at {:5d}: haystack {}, needle {}'.format(\
+									haystackbits[offset], offset, \
+									haystackbits[offset+1:offset+5+fix_window], needlebits[offset:offset+4+fix_window]), 2)
+							return False
+				else:
+					# needle has the duplicate bit
+					if haystackbits[offset:offset+fix_window] == needlebits[offset+1:offset+1+fix_window]:
+						# surgery will bring them back in sync, so do it
+						if report_surgery:
+							message('Needle dup {:1d}: Fixed at {:5d}'.format(needlebits[offset], offset), 2)
+						del needlebits[offset]
+					else:
+						# check to see if a double bitectomy would help
+						if haystackbits[offset:offset+fix_window] == needlebits[offset+2:offset+fix_window+2]:
+							# it dows. Amazing.
+							if report_surgery:
+								message('Needle dupdup {:1d}: Fixed at {:5d}'.format(needlebits[offset], offset), 2)
+							del needlebits[offset]
+							del needlebits[offset]
+						else:
+							# surgery does not help
+							# fail now
+							if report_surgery:
+								message('Needle dup {:1d}: Surgery wont help at {:5d}: haystack {}, needle {}'.format(\
+									needlebits[offset], offset, \
+									haystackbits[offset:offset+4+fix_window], needlebits[offset+1:offset+5+fix_window]), 2)
+							return False
+	# if we made it this far out, it was a total match modulo surgery
+	return {'needlebits': needlebits, 'haystackbits': haystackbits}
+	return True
+	# New algorithm above, following code does not get executed
 	# If the match wasn't exact, we need to scan
 	# At first I was trying to deal with the possibility of getting a spurious 1
 	# Now I'm just going for a high degree of match.
@@ -1172,6 +1260,13 @@ def set_track_points_to_sync(track):
 	track['match_bits'] = 0
 	return track	
 
+# Finding the repeats in the raw EDD data is actually somewhat of a challenge because the raw bits that
+# come in are understandably very timing dependent.  Slower drives read more raw bits, and even beyond
+# the basic speed adjustment of the drive, the drive does vary a bit even at a micro level.  But the EDD
+# card will read whatever is there every 32 cycles.  Since the advice is generally to run the drive a
+# little bit slow, odds are high that rather than missing any bits, there will be an occasional bit that
+# is read twice.  Since we're reading each track approximately 2.5 times per sample we can make a comparison
+# to try to rectify double reads of this sort, but it's all zeros and ones.
 def find_repeats(track):
 	'''Analyze a track to find the repeat points'''
 	global options
@@ -1240,15 +1335,23 @@ def find_repeats(track):
 			stop_offset = needle_offset + 52500
 			while haystack_offset < stop_offset:
 				stop0 = haystack_offset + window0
-				if check_match(needle0, bits[haystack_offset: stop0]):
+				repaired_bits = check_match(needle0, bits[haystack_offset: stop0])
+				if repaired_bits:
+					message('Short match at haystack {:5d}'.format(haystack_offset), 2)
 					(track['match_hits'])[0] += 1
-					stop1 = haystack_offset + window1
-					if check_match(needle1, bits[stop0: stop1]):
+					# stop1 = haystack_offset + window1
+					# if check_match(needle1, bits[stop0: stop1]):
+					repaired_bits = check_match(repaired_bits['needlebits'][0:window0+window1], repaired_bits['haystackbits'][0:window0+window1])
+					if repaired_bits:
+						message('Medium match at haystack {:5d}'.format(haystack_offset), 2)
 						(track['match_hits'])[1] += 1
 						# We got a match sufficient to call the repeat
 						found_match = True
-						stop2 = haystack_offset + window2
-						if check_match(needle2, bits[stop1: stop2]):
+						# stop2 = haystack_offset + window2
+						# if check_match(needle2, bits[stop1: stop2]):
+						repaired_bits = check_match(repaired_bits['needlebits'][0:window0+window1+window2], repaired_bits['haystackbits'][0:window0+window1+window2])
+						if repaired_bits:
+							message('Long match at haystack {:5d}'.format(haystack_offset), 2)
 							(track['match_hits'])[2] += 1
 							if check_match(needle3, bits[stop2: haystack_offset + window3]):
 								(track['match_hits'])[3] += 1
@@ -1292,7 +1395,8 @@ def find_repeats(track):
 		track['match_found'] = found_match
 	track['data_bits'] = track['match_haystack'] - track['match_needle']
 	# Analyze bit differences and repair the bit stream
-	if options['repair_tracks']:
+	# permanently disable repair for the moment because it happens during compare.
+	if options['repair_tracks'] and False:
 		track = repair_bitstream(track)
 		# since this may have changed during the repair, recompute the length
 		track['data_bits'] = track['match_haystack'] - track['match_needle']
