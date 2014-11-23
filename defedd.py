@@ -28,13 +28,15 @@ import time
 
 
 # options will be stored globally for retrievability
-options = {'write_nib': False, 'write_dsk': False, 'write_mfi': False, 'write_fdi': False, 
-		'write_po': False, 'write_v2d': False, 'write_nit': False, 'write_protect': False, 
-		'process_quarters': True, 'process_halves': True, 'analyze_sectors': True,
+options = {'write_protect': False, 
+		'process_quarters': True, 'process_halves': True, 'analyze_sectors': True, 
 		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'write_log': False,
-		'write_full': False, 'no_translation': False,
+		'write_full': False, 'no_translation': False, 'analyze_bits': True, 'analyze_nibbles': True,
 		'repair_tracks': True, 'use_second': False,
-		'use_slice': False, 'from_zero': False, 'spiral': False}
+		'use_slice': False, 'from_zero': False, 'spiral': False,
+		'output_basename': 'outputfilename',
+		'output': {'nib': False, 'dsk': False, 'mfi': False, 'fdi': False, 'po': False, 'v2d': False, 'nit': False}
+		}
 
 def main(argv=None):
 	'''Main entry point'''
@@ -51,37 +53,47 @@ def main(argv=None):
 		print(str(err))
 		usage()
 		return 1
+
+	try:
+		eddfilename = args[0]
+	except:
+		print('You need to provide the name of an EDD file to begin.')
+		return 1
+
 	for o, a in opts:
 		if o == "-h":
 			usage()
 			return 0
+		# output file type options
 		elif o == "-f" or o == "--fdi":
-			options['write_fdi'] = True
+			options['output']['fdi'] = write_fdi_file
+			# options['output']['fdi'] = eddfilename + ".fdi"
 			print("Will save fdi file.")
 		elif o == "-m" or o == "--mfi":
-			options['write_mfi'] = True
+			options['output']['mfi'] = write_mfi_file
 			print("Will save mfi file.")
 		elif o == "-5" or o == "--v2d":
-			options['write_v2d'] = True
+			options['output']['v2d'] = write_v2d_file
 			print("Will save v2d/d5ni file.")
 		elif o == "-n" or o == "--nib":
-			options['write_nib'] = True
+			options['output']['nib'] = write_nib_file
 			print("Will save nib file.")
-		elif o == "-t" or o == "--nit":
-			options['write_nit'] = True
-			print("Will save nit (nibble timing) file.")
+		# elif o == "-t" or o == "--nit":
+		# 	options['output']['nit'] = write_nit_file
+		# 	print("Will save nit (nibble timing) file.")
 		elif o == "-d" or o == "--dsk":
-			options['write_dsk'] = True
+			options['output']['dsk'] = write_dsk_file
 			print("Will save dsk file (DOS 3.3 order, a.k.a. .do).")
-		elif o == "-p" or o == "--po":
-			options['write_po'] = True
-			print("Will save ProDOS-ordered po (dsk-like) file.")
-		elif o == "-x" or o == "--protect":
-			options['write_protect'] = True
-			print("Will write image as write-protected if supported (FDI)")
+		# elif o == "-p" or o == "--po":
+		# 	options['output']['po'] = write_po_file
+		# 	print("Will save ProDOS-ordered po (dsk-like) file.")
 		elif o == "-l" or o == "--log":
 			options['write_log'] = True
 			print("Will save log file.")
+		# other options
+		elif o == "-x" or o == "--protect":
+			options['write_protect'] = True
+			print("Will write image as write-protected if supported (FDI)")
 		elif o == "-1" or o == "--int":
 			options['process_quarters'] = False
 			options['process_halves'] = False
@@ -127,32 +139,37 @@ causing the candle to flicker, much like a cursor in a dark terminal window.
 Our story begins with a single command, cautiously typed at a prompt. . .
 ''')
 
-	try:
-		eddfilename = args[0]
-	except:
-		print('You need to provide the name of an EDD file to begin.')
-		return 1
-	options['pofilename'] = eddfilename + ".po"
-	options['nibfilename'] = eddfilename + ".nib"
-	options['nitfilename'] = eddfilename + ".nit"
-	options['dskfilename'] = eddfilename + ".dsk"
-	options['mfifilename'] = eddfilename + ".mfi"
-	options['fdifilename'] = eddfilename + ".fdi"
-	options['v2dfilename'] = eddfilename + ".v2d"
-	options['logfilename'] = eddfilename + ".log"
+	options['output_basename'] = eddfilename
 
 	# Do some sanity checking
+	# To write dsk files we need to do the sector analysis, for others it is not needed
+	if options['output']['dsk'] and not options['analyze_sectors']:
+		print('It is necessary to analyze sectors in order to write a .dsk file, turning that option on.')
+		options['analyze_sectors'] = True
+	# To write pure EDD->fdi files (which OpenEmulator can handle), we don't need to do any analysis.
+	# If user picked no translation but picked something other than fdi, turn no translation off
+	if options['no_translation']:
+		options['analyze_bits'] = False
+		options['analyze_nibbles'] = False
+		for output_file in options['output'].items():
+			if output_file[1] and output_file[0] != 'fdi':
+				print('No translation is only valid for fdi, but since you picked a different output format, analysis is still needed.')
+				options['analyze_bits'] = True
+				options['analyze_nibbles'] = True
+				break
+
 	# TODO: Improve the style of the quarter/half/whole track decisionmaking here
-	if options['process_quarters'] and not options['write_mfi'] and not options['write_fdi']:
+	if options['process_quarters'] and not options['output']['mfi'] and not options['output']['fdi']:
 		options['process_quarters'] = False
-		if options['process_halves'] and not options['write_v2d']:
+		if options['process_halves'] and not options['output']['v2d']:
 			print('Only processing whole tracks, no sense in processing quarter tracks unless they will be stored.')
 			options['process_halves'] = False
 		else:
 			print('Only processing half tracks, no sense in processing quarter tracks unless they will be stored.')
-	if options['write_dsk'] and options['write_po']:
-		options['write_po'] = False
-		print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
+	# I think I am going to remove the po option for now until I settle the analysis portion
+	# if options['output']['dsk'] and options['output']['po']:
+	# 	options['output']['po'] = False
+	# 	print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
 	# TODO: Maybe there is other sanity checking to do here, add if it occurs to me
 
 	# Main analysis loop.  This goes through the whole EDD file track by track and analyzes each track.
@@ -163,6 +180,9 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 			options['console'].append(open(options['logfilename'], mode="w"))
 		tracks = []
 		current_track = 0.0
+		# this is the length we will use when we need to just guess bit length of a track
+		# as soon as a more credible length is found, it will be superseded
+		track_length_guess = 51500
 		# Loop through the tracks
 		while True:
 			# Keep track of how long the track takes, helpful (to me) in trying to tighten the analysis loops
@@ -175,23 +195,81 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 				if phase == 0 or options['process_quarters'] or (phase == 2 and options['process_halves']):
 					# track is the data structure we are storing all the accumulated information in.
 					track = {'track_number': current_track}
+					# FDI format wants the offset of the index pulse in the bit stream
+					# I'll store it in the track data in case I ever want to change it or if some other format wants it
 					track['index_offset'] = 0 # bit position of the index pulse
-					# get track bits and parse them into nibbles
-					# this will also provide the sync regions which we can use to estimate track length
+					# convert EDD bytes into an actual bit stream
 					track['bits'] = bytes_to_bits(eddbuffer)
-					nibbles = nibblize(track['bits'])
-					track['nibbles'] = nibbles['nibbles']
-					track['offsets'] = nibbles['offsets']
-					track['nits'] = nibbles['nits']
-					track['sync_regions'] = nibbles['sync_regions']
-					# Analyze track for standard 13/16 formats, for dsk and repeat hinting
-					if options['analyze_sectors']:
-						track = consolidate_sectors(locate_sectors(track))
-					if options['write_fdi'] or options['write_mfi']:
-						# this bit level repeat finding is slow and not necessary for dsk/nib
-						# Find areas of sync nibbles for repeat hinting
+					# Analyze the bits unless we're just going to dump them into a raw FDI file
+					if options['analyze_bits']:
+						# First order of business is to try to eliminate double-sampled bits in the EDD stream
+						track = clean_bits(track)
+					if options['analyze_nibbles']:
+						# Now we want to nibblize the track
+						# This will give us the sync bits as well
+						# This part is not optional, but it seemed sensible to do the cleaning first.
+						# At this point, we may well not have a good handle on where the track begins and ends.
+						# We will do a second fairly exhaustive search using two nibblizing heads to see if we
+						# can get the nibbles to match.  If the bits matched well, this will go quickly.
+						# If the bits didn't match well, perhaps the nibbles will match better.
+						# The last act of this routine is to grab the nibbles from the whole track synced with best match
+						# If we want to skip the nibble search and just do the whole track, pass False as second parameter.
+						track = nibblize(track)
+						# It is still conceivable that we don't have a perfect handle on the track
+						# if we didn't find a perfect bit or nibble match.  We can try analyzing the sync regions.
+						# Right now this just looks at the longest three and sees if they end a plausible track distance apart.
 						track = analyze_sync(track)
-						track = find_repeats(track)
+						# Analyze track for standard 13/16 formats
+						# This can be turned off as an option if we know that the disk has no relevant sectors
+						if options['analyze_sectors']:
+							track = consolidate_sectors(locate_sectors(track))
+					# And now we're just going to have to evaluate what we got, do the best we can.
+					# Set up the track bits
+					# If we got perfect or good bit match, use that
+					# Defining good is tricky.  I'll put it at 20% for now.
+					if 'bit_match' in track and (track['bit_match'] or track['bit_progress'] > 10000):
+						track['track_start'] = track['bit_needle']
+						track['track_repeat'] = track['bit_haystack']
+						track_length_guess = track['bit_haystack'] - track['bit_needle']
+					else:
+						# not such a great bit match, sector seek is probably next most reliable
+						if 'sector_track_bits' in track:
+							track['track_start'] = track['sector_first_offset']
+							track['track_repeat'] = track['track_start'] + track['sector_track_bits']
+							track_length_guess = track['bit_haystack'] - track['bit_needle']
+						else:
+							# if sectors did not work fall back to sync if we can
+							if 'sync_start' in track:
+								track['track_start'] = track['sync_start']
+								track['track_repeat'] = track['sync_repeat']
+								# not sure this is even reliable enough to use
+								# track_length_guess = track['bit_haystack'] - track['bit_needle']
+							else:
+								# if nothing got us a good track cut, then we treat it as unformatted
+								# picking arbitrary numbers here.
+								track['track_start'] = 0
+								track['track_repeat'] = track_length_guess
+					if options['spiral']:
+						# advance about a third of turn into the track on each quarter track, an attempt to help sync
+						# Testing out on Jawbreaker (spiradisc), didn't work: 17000, 18000, 17250, 17750, 20000, 20006
+						# Jawbreaker track zero should be 51091 bits long
+						# track zero 17931-separated sync is 20007 bits later on track 0.25 read than on track 0 read.
+						# so track .25 should be shifted about 2.55ths of a track back.
+						# we have about 6.5 "shifts" of this length worth of bits available.
+						# so we shift up 20007 each time, but on the third shift, we subtract out 51091
+						# so we can shift 20007, 40014, 60021, 80028, 100035
+						# or 20007, 400014, 8930, 28937, 48944, 17860
+						# this is 20007*track - length*int(track/3)
+						# mathematically, the following works, but Jawbreaker doesn't boot.
+						quarter_track_number = int(4 * track['track_number'])
+						track_length = 51091
+						advance = 20007 * quarter_track_number - track_length*int(quarter_track_number/3)
+						message('advance is {}'.format(advance), 0)
+					else:
+						advance = 0
+					track['track_bits'] = track['bits'][track['track_start'] + advance: track['track_repeat'] + advance]
+					# TODO: Test for use_second, write_full, from_zero, spiral here
+					# Nibbles should already be set up by the nibblizer, no decisions to make.
 					track['processing_time'] = time.clock() - track_start_clock
 					track_status(track)
 					tracks.append(track)
@@ -201,30 +279,29 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 			# Maybe someday this can be a parameter, but I'll get it working on quarter tracks first.
 			current_track += 0.25
 
-		if options['write_nib']:
-			write_nib_file(eddfile, tracks)
-		if options['write_v2d']:
-			write_v2d_file(eddfile, tracks)
-		if options['write_dsk'] or options['write_po']:
-			write_dsk_file(eddfile, tracks)
-		if options['write_fdi']:
-			write_fdi_file(eddfile, tracks)
-		if options['write_mfi']:
-			write_mfi_file(eddfile, tracks)
+		for output_type, output_file in options['output'].items():
+			if output_file:
+				output_file(eddfile, tracks)
+
+		# close the log file if we were writing to it
 		if options['write_log']:
 			(options['console'])[1].close
 	return 1
 
 def track_status(track):
 	'''Display information about track analysis'''
-	sectors = " {:2d} sectors".format(len(track['all_sectors'])) if 'all_sectors' in track else ''
-	match = " {:6d} bitmatch".format(track['match_bits']) if 'match_bits' in track else ''
-	bits = " {:6d} trackbits".format(track['data_bits']) if 'data_bits' in track else ''
-	needle = " {:5d} bitstart".format(track['match_needle']) if 'match_needle' in track else ''
-	hits = " {!s} hits".format(track['match_hits']) if 'match_hits' in track else ''
+	global options
 	trk = "{:5.2f}:".format(track['track_number'])
+	bit_length = track['track_repeat'] - track['track_start']
+	if options['no_translation']:
+		bits = " No translation, sending all {:5d} bits to fdi file.".format(len(track['bits']))
+	else:
+		bits = " {:6d} trackbits".format(bit_length)
+		bits += " {:6d} bits matched".format(track['bit_progress']) #if 'bit_progress' in track else ''
+	sectors = " {:2d} sectors".format(len(track['all_sectors'])) if 'all_sectors' in track else ''
+	needle = " {:5d} start".format(track['track_start'])
 	proc = " {:5.2f}s".format(track['processing_time'])
-	message(trk + sectors + match + bits + needle + proc + hits)
+	message(trk + bits + sectors + needle + proc)
 
 # A message sent at level 0 (default) is always displayed
 # level 1 is displayed in verbose mode, level 2 is displayed in werbose mode
@@ -256,6 +333,7 @@ Output formats:
  -l, --log     Write .log file of conversion output
  -x, --protect Write protect the disk image if supported (fdi)
 Analysis options:
+ -z, --nibscan Use double nibble scan to find track
  -q, --quick   Skip standard sector analysis, ok for fdi/mfi/nib
  -1, --int     Consider only whole tracks (not quarter tracks)
  -c, --cheat   Write full 2.5x bit read for unparseable tracks (vs. unformatted)
@@ -287,241 +365,6 @@ Help and debugging:
  	''')
 	return
 
-def write_dsk_file(eddfile, tracks):
-	'''Write the data out in the form of a 34-track dsk or po file'''
-	global options
-	outfile = options['pofilename'] if options['write_po'] else options['dskfilename']
-	with open(outfile, mode="wb") as dskfile:
-		for track in tracks:
-			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
-				dskfile.write(track['dsk_bytes'])
-
-def write_nib_file(eddfile, tracks):
-	'''Write the data out in the form of a 34-track nib file'''
-	global options
-	with open(options['nibfilename'], mode="wb") as nibfile:
-		for track in tracks:
-			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
-				if 'sync_nibstart' in track:
-					sync_nibstart = track['sync_nibstart']
-					nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
-				else:
-					nibfile.write((track['nibbles'])[:0x1a00])
-
-def write_nib_file(eddfile, tracks):
-	'''Write the nibble timing data out in the form of a (quarter tracked) nit file'''
-	# nit files from I'm fEDD Up include all tracks analyzed, not just whole tracks
-	# This is not going to be very useful for debugging unless the nib also matches I'm fEDD Up's nib
-	# and actually it might not if we're starting inside the track.  So, I added this, but it might
-	# be worth taking out again.  Can't tell if I'll ever use it.  Just curious.
-	global options
-	with open(options['nitfilename'], mode="wb") as nibfile:
-		for track in tracks:
-			if 'sync_nibstart' in track:
-				sync_nibstart = track['sync_nibstart']
-				nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
-			else:
-				nibfile.write((track['nibbles'])[:0x1a00])
-
-def write_v2d_file(eddfile, tracks):
-	'''Write the data out in the form of a half-tracked v2d/d5ni file'''
-	global options
-	# This in principle can store variable numbers of nibbles per track.
-	# Right now the computation of number of nibbles is not done very well, really.
-	# requires a track analysis.  For the moment, I'll just store the first 1a00 nibbles on each track.
-	# In Virtual II, it seems only to accept half (not quarter) tracks.
-	# I think it is possible to not even have enough nibbles found for even 1a00, in which case, write fewer.
-	with open(options['v2dfilename'], mode="wb") as v2dfile:
-		# precompute the lengths so we can get the filesize
-		# nibs_to_write = 13312 # cheat massively - VII rejects this
-		# nibs_to_write = 7400 # cheat -- this is about as big as I've seen VII accept
-		nibs_to_write = 7168 # cheat -- 1c00
-		# nibs_to_write = 6656 # 1a00 - standard for nib
-		filesize = 0
-		num_tracks = 0
-		for track in tracks:
-			quarter_track = int(4 * track['track_number'])
-			phase = quarter_track % 4
-			if phase == 0 or phase == 2:
-				if len(track['nibbles']) < nibs_to_write:
-					filesize += len(track['nibbles'])
-				else:
-					filesize += nibs_to_write
-				# and four bytes for the track header
-				filesize += 4
-				if len(track['nibbles']) > 0:
-					# is it even possible to have zero nibbles, e.g., on an unformatted track?  All zeros?
-					# Just in case, catch it I guess.  At some point, actually check to see if it ever happens
-					num_tracks += 1
-		# write the d5ni/v2d header
-		# filesize = len(tracks) * (nibs_to_write + 4) # (1a00 + 4) * tracks
-		v2dfile.write(struct.pack('>I', filesize)) # size of whole file
-		v2dfile.write(b"D5NI") #signature
-		v2dfile.write(struct.pack('>H', num_tracks)) # number of tracks
-		for track in tracks:
-			quarter_track = int(4 * track['track_number'])
-			phase = quarter_track % 4
-			if phase == 0 or phase == 2:
-				if len(track['nibbles']) > 0:
-					# assuming there are some nibbles (otherwise, skip the track)
-					# write the track header
-					v2dfile.write(struct.pack('>H', int(4 * track['track_number']))) # quarter track index
-					if len(track['nibbles']) < nibs_to_write:
-						# if we don't have enough nibbles around to write, then cut the track back
-						v2dfile.write(struct.pack('>H', len(track['nibbles']))) # bytes in this track
-					else:
-						v2dfile.write(struct.pack('>H', nibs_to_write)) # bytes in this track
-					# TODO: Maybe try to use sync_nibstart like .nib writing does.  Not now, though.
-					# This should write as many nibbles as we have, if it is fewer than nibs_to_write
-					v2dfile.write((track['nibbles'])[:nibs_to_write])
-
-def write_fdi_file(eddfile, tracks):
-	'''Write the data out in the form of an FDI file'''
-	global options
-	with open(options['fdifilename'], mode="wb") as fdifile:
-		# Write the FDI header
-		fdifile.write(b"Formatted Disk Image file\n\r") #signature
-		fdifile.write(b"defedd, version 0.0a          \n\r") #creator
-		for x in range(81): # comment field and eof marker
-			fdifile.write(b"\x1a") 
-		fdifile.write(b"\x02\x00") #version 2.0
-		fdifile.write(b"\x00\x9f") #last track for OE, corresponds to 160 quarter tracks, or 40 tracks
-		fdifile.write(b"\x00") #last head
-		fdifile.write(b"\x01") #5.25
-		fdifile.write(b"\xac") #300 rpm
-		if options['write_protect']:
-			fdifile.write(b"\x01") #flags, not write protected, not index synchronized
-		else:
-			fdifile.write(b"\x00") #flags, not write protected, not index synchronized
-		fdifile.write(b"\x05") #192 tpi (quarter tracks)
-		fdifile.write(b"\x05") #192 tpi (quarter tracks, though the heads aren't really this narrow)
-		fdifile.write(b"\x00\x00") #reserved
-		for track in tracks:
-			phase = (4 * track['track_number']) % 4
-			if options['process_quarters'] or phase == 0 or (options['process_halves'] and phase == 2):
-				fdifile.write(b"\xd2") # raw GCR
-				if track['data_bits'] == 0:
-					# treat track as unformatted (so we don't even have the 8 header bits)
-					fdifile.write(b'\x00\x00')
-				else:
-					track['fdi_write_length'] = 8 + len(track['fdi_bytes'])
-					track['fdi_page_length'] = math.ceil(track['fdi_write_length'] / 256)
-					fdifile.write(bytes([track['fdi_page_length']]))
-			if phase == 0 and not options['process_quarters']:
-				# write zeros for lengths of quarter tracks
-				fdifile.write(b'\x00\x00\x00\x00\x00\x00')
-		# Write out enough zeros after the track data to get us to a page boundary
-		if options['process_quarters']:
-			tracks_written = len(tracks)
-		else:
-			tracks_written = 4 * len(tracks)
-		for extra_track in range(20 + 160 - tracks_written):
-			fdifile.write(b"\x00\x00")
-
-		# go to the beginning of the eddfile in case we want to write bytes straight out of it
-		eddfile.seek(0)
-
-		for track in tracks:
-			track_index = track['track_number'] * 4
-			phase = track_index % 4
-			if options['process_quarters'] or phase == 0:
-				if track['data_bits'] > 0:
-					fdifile.write(struct.pack('>L', track['data_bits']))
-					fdifile.write(struct.pack('>L', track['index_offset']))
-					if options['from_zero']:
-						# if asked, we can at this point pass bits straight from the EDD file
-						# I am allowing this on the suspicion that it might preserve a little bit
-						# more inter-track sync information for track arcing.
-						eddbuffer = eddfile.read(16384)
-						fdifile.write(eddbuffer[:track['data_bits']])
-					else:
-						# bitstream data could actually come straight out of the EDD file
-						# but I will use the one that was re-encoded based on repeat location
-						fdifile.write(track['fdi_bytes'])
-					# pad to a page boundary.
-					for x in range(256 - track['fdi_write_length'] % 256):
-						fdifile.write(b"\x00")
-
-def write_mfi_file(eddfile, tracks):
-	'''Write the data out in the form of a MESS Floppy Image file'''
-	global options
-	with open(options['mfifilename'], mode="wb") as mfifile:
-		# Preprocess the tracks because we need this information for the header
-		# Don't have the same option of storing 2.5x revolutions of bits in MFI
-		# So, we need to use the track section we identified.
-		eddfile.seek(0)
-		current_track = 0.0
-		while False:
-			if eddbuffer:
-				track_index = current_track * 4
-				phase = track_index % 4
-				# TODO: allow for quarter tracks when the container supports it
-				if phase == 0:
-					track = tracks[int(track_index)]
-					haystack_offset = track['haystack_offset']
-					track_length = haystack_offset - track[needle_offset]
-					if track_length > 52000:
-						haystack_offset = track[needle_offset] + 52000
-					track_bits = (track['bits'])[track['needle_offset']: track['haystack_offset']]
-					start_bit = 0
-					# TODO: Allow for positioning of the start bit with something sensible.
-					cell_length = math.floor(2000000 / len(track_bits))
-					if cell_length % 2 == 1:
-						cell_length -= 1
-					mfi_bits = track['bits']
-					running_length = 0
-					zero_span = cell_length
-					level_a = True
-					odd_trans = False
-					mfi_track = []
-					mg_b = 1 << 28
-					for bit in track['bits']:
-						if bit == 1:
-							if level_a:
-								mfi_track.append(struct.pack('>L', zero_span + mg_b))
-							else:
-								mfi_track.append(struct.pack('>L', zero_span))
-							running_length += zero_span
-							zero_span = cell_length
-							odd_trans = not odd_trans
-							level_a = not level_a
-						else:
-							zero_span += cell_length
-					pad = (200000000 - running_length)
-					if odd_trans and level_a:
-						pad += mg_b
-					mfi_track.append(struct.pack('>L', pad))
-					mfi_track_z = zlib.compress(mfi_track)
-					mfitrackdata.append(mfi_track_z)
-					mfitracklength.append(len(mfi_track))
-					print('Track {} uncompressed {}, compressed {}'.format(current_track, len(mfi_track), len(mfi_track_z)))
-					tracks_to_do = 35
-					mfifile.write(b"MESSFLOPPYIMAGE\x00") #signature
-					mfifile.write(struct.pack('>L', 35)) #last track
-					mfifile.write(struct.pack('>L', 1)) #last head
-					mfifile.write(b"525 ") #form factor
-					mfifile.write(b"SSDD") #variant
-					current_offset = 16 + 16 + (16 * tracks_to_do)
-					for track_number in range(0, tracks_to_do):
-						if mfitracklength[track] > 0:
-							mfifile.write(struct.pack('>L', current_offset))
-							mfifile.write(struct.pack('>L', len(mfitrackdata[track]))) #compressed length in bytes
-							mfifile.write(struct.pack('>L', mfitracklength[track])) #uncompressed length in bytes
-							mfifile.write(struct.pack('>L', 1000)) #write splice, arbitrarily picked at 1000
-							current_offset += mfitrackdata[track].length
-						else:
-							# if the track does not exist (e.g., we need track 34.5 but have only to 34), write empty track
-							mfifile.write(struct.pack('>L', current_offset))
-							mfifile.write(struct.pack('>L', 0)) #compressed length in bytes
-							mfifile.write(struct.pack('>L', 0)) #uncompressed length in bytes
-							mfifile.write(struct.pack('>L', 0)) #write splice, arbitrarily picked at 0
-					# write the MFI track data itself
-					for track_number in range(0, tracks_to_do):
-						if mfitrackdata[track]:
-							mfifile.write(mfitrackdata[track])
-			else:
-				break
-
 def bytes_to_bits(eddbuffer):
 	'''Convert bytes into component bits'''
 	bits = bytearray()
@@ -532,34 +375,15 @@ def bytes_to_bits(eddbuffer):
 		bits.extend(bytebits)
 	return bits
 
-def nibblize(bits):
-	'''Convert track bits into nibbles by emulating the Disk II controller'''
-	# The basic operation of this is just emulating the sequencer
-	# Generally, accumulate bits until high bit gets set, record that as a nibble,
-	# and then wait for the next 1 to start accumulating data again.
-	# This allows for auto-sync by writing FF then zeros, then FF, then zeros.
-	# That reads as a sequence of FFs (eventually) and leaves the sequencer ready
-	# to start reading regular 8-bit nibbles in the same place.
-	# We will also keep track of "long nibbles" (sync nibbles, unless it's part of a protection).
-	# Elsewhere these will get analyzed to try to determine the track length in bits.
-	# What comes out of this is a structure with:
-	# nibbles being the array of actual nibbles read
-	# offsets being a corresponding array that indicates which bit in the bitstream ended the nibble
-	# nits being a corresponding array that indicates how many extra leading zeros there were
-	#  (this should correspond to the .nit file that I'm fEDD Up produces)
-	# sync_regions is an array of regions where long nibbles were found, each member being a vector
-	#	with [number of sequential long nibbles, offset of first one, offset of last one]
-	nibbles = bytearray()
-	offsets = []
-	nits = []
-	sync_regions = []
+def grab_nibble(bits):
+	'''Take the first nibble off the bit stream that was passed in'''
 	offset = 0
-	sync_start = 0
-	sync_run = 0
 	leading_zeros = 0
 	data_register = 0
 	wait_for_one = True
-	for bit in bits:
+	stop_offset = len(bits)-1
+	while offset < stop_offset:
+		bit = bits[offset]
 		if bit == 1:
 			data_register = (data_register << 1) + 1
 			wait_for_one = False
@@ -569,29 +393,209 @@ def nibblize(bits):
 			else:
 				data_register = data_register << 1
 		if data_register > 127:
-			wait_for_one = True
-			nibbles.append(data_register)
-			offsets.append(offset) # offset represents the index into bits when nibble was complete
-			nits.append(leading_zeros)
-			if leading_zeros > 0:
-				# this was a long nibble, a sync byte or something more devious.
-				# if it's the first one, start recording this as a region
-				if sync_start == 0:
-					sync_start = offset
-					sync_run = 0
-				else:
-					# and if it is continuing in a region we already opened, keep track of the number of nibbles
-					sync_run += 1
-			else:
-				# this is a regular sized nibble, but if we were recording a sync region, close it
-				if sync_start > 0:
-					sync_regions.append([sync_run, sync_start, offset])
-					sync_start = 0
-					sync_run = 0
-			leading_zeros = 0
-			data_register = 0
+			# nibble complete return it
+			break
 		offset += 1
-	return {'nibbles': nibbles, 'offsets': offsets, 'nits': nits, 'sync_regions': sync_regions}
+	# if we run out of data, return what we had, though it is probably useless to do so.	
+	return {'nibble': data_register, 'leading_zeros': leading_zeros, 'offset': offset}
+
+# This pushes the head ahead past the sync nibbles to reach a synced nibble.
+# My first attempt was to just look for the first short nibble after some long ones.
+# That's no good because sync nibbles are not guaranteed to read as long unless we
+# are already in sync.  What I need to do instead is look for a long nibble, then a
+# series of short nibbles.  I will have succeeded if I get a long nibble and then
+# several short ones, and I'll return the last long one (likely D5).
+# This may not work perfectly on weirdly formatted disks, but they need to be in sync
+# too, no?  I guess I worry about spirals, syncing on one track and then moving to another.
+# Would also be possible to get in sync by using (more) 9-bit nibbles instead of 10-bit nibbles.
+# This will fail to see those.  Probably should add some verbosity to see what it actually finds.
+def grab_first_post_sync_nibble(bits):
+	'''Search bits for at least two long nibbles and return the last one'''
+	offset = 0
+	long_nibbles_found = 0
+	short_nibbles_found = 0
+	while offset < len(bits):
+		nibble = grab_nibble(bits[offset:])
+		if nibble['leading_zeros'] > 0:
+			# this is a long nibble
+			long_nibbles_found += 1
+			# message('10-bit nibble number {}.'.format(long_nibbles_found), 2)
+			# reset the short nibbles count
+			short_nibbles_found = 0
+			# and remember the last long nibble, that is what we are going to return
+			# (because it is really the end of the sync span)
+			# offset here where we start looking, nibble[offset] is where that nibble ended.
+			# we are returning where the nibble starts
+			last_long_nibble = {'offset': offset, 'nibble': nibble}
+		# elif nibble['leading_zeros'] == 1:
+		# 	# if the "long nibble" only has one timing bit leading into it
+		# 	# it is not a real sync nibble
+		# 	# reset everything and try again
+		# 	# message('Resetting at a 9-bit nibble.', 2)
+		# 	long_nibble_founds = 0
+		# 	short_nibbles_found = 0
+		else:
+			# this is a short nibble
+			# have we already hit enough long nibbles?
+			if long_nibbles_found > 2:
+				# yes, have we found enough short nibbles?
+				short_nibbles_found += 1
+				if short_nibbles_found > 6:
+					# yep, we've got enough.  So return the last long nibble we found
+					return last_long_nibble
+		offset += nibble['offset'] + 1
+	# if we get to here we failed to find two long nibbles and a short one.
+	message('Could not find even a single long nibble followed by a series of short ones!', 2)
+	return False
+
+# Nibblize the bit stream in two different positions in sync, to find the highest rate
+# of nibble match.  Also keeps track of timing bits.  Will finish by creating nibble stream
+# of entire track (or possibly entire track starting from beginning of best match).
+# To avoid the search part and just go with the whole track, pass False as second paramter
+# TODO: The odds are good that the nibbles at the beginning will be out of sync.
+# See if I can maybe start the nibble check once they are in sync by waiting for two long nibbles first.
+# YOU ARE HERE
+def nibblize(track, do_search = True):
+	'''Run two heads over the bitstream to try to find consistent nibbles'''
+	bits = track['bits']
+	# We might have a guess from the bit analysis about where the track is.
+	needle_offset = track['bit_needle'] if 'bit_needle' in track else 0
+	haystack_start = track['bit_haystack'] if 'bit_haystack' in track else 49000
+	best = {'ok': False, 'needle': needle_offset, 'haystack': haystack_start, 'nibbles': []}
+	if do_search:
+		# align the needle to a post-sync nibble
+		nibble = grab_first_post_sync_nibble(bits)
+		# message('Grab first post sync nibble returned {}'.format(nibble), 2)
+		if nibble:
+			needle_offset += nibble['offset']
+			message('Needle offset moved to {}'.format(needle_offset), 2)
+		nibbles = []
+		found_match = False
+		nibbles_collected = 0
+		needle_head = 0
+		haystack_head = 0
+		track_maximum = 52500
+		if needle_offset + (2 * track_maximum) > len(bits):
+			haystack_stop = len(bits) - track_maximum
+		else:
+			haystack_stop = needle_offset + track_maximum
+		needle_increment = 2500
+		needle_stop = 52500
+		haystack_offset = haystack_start
+		while True:
+			# find the next nibble under the needle head
+			needle_bits = bits[needle_offset + needle_head:]
+			needle_nibble = grab_nibble(needle_bits)
+			# get the next nibble under the haystack head to see if it matches
+			haystack_bits = bits[haystack_offset + haystack_head:]
+			haystack_nibble = grab_nibble(haystack_bits)
+			# message('Check at needle {} got {:2x}({}) and haystack {} got {:2x}({})'.format(\
+			# 	needle_offset+needle_head, needle_nibble['nibble'], needle_nibble['offset'], \
+			# 	haystack_offset+haystack_head, haystack_nibble['nibble'], haystack_nibble['offset']), 2)
+			if needle_nibble['nibble'] != haystack_nibble['nibble']:
+				# they don't match
+				# was this a better run than current best?
+				if len(nibbles) > len(best['nibbles']):
+					# yes, record it
+					best = {'ok': False, 'needle': needle_offset, 'haystack': haystack_offset, 'nibbles': nibbles}
+					message('Current best: {:4d} nibbles, needle {:5d}, haystack {:5d}'.format(len(nibbles), needle_offset, haystack_offset), 2)
+				# reset state for the next search iteration
+				needle_head = 0
+				haystack_head = 0
+				nibbles = []
+				haystack_offset += 1
+				if haystack_offset < haystack_stop:
+					continue
+				else:
+					# we've run off the end with the haystack, so try advancing the needle
+					needle_offset += needle_increment
+					message('Nibble needle pushed forward, to {:5d}.'.format(needle_offset), 2)
+					# align the needle to a post-sync nibble
+					nibble = grab_first_post_sync_nibble(bits[needle_offset:])
+					# message('Grab first post sync nibble returned {}'.format(nibble), 2)
+					if nibble:
+						needle_offset += nibble['offset']
+						message('Needle offset moved past timing bits to {}.'.format(needle_offset), 2)
+					if needle_offset < needle_stop:
+						haystack_offset = haystack_start + needle_offset
+						if needle_offset + (2 * track_maximum) > len(bits):
+							haystack_stop = len(bits) - track_maximum
+						else:
+							haystack_stop = needle_offset + track_maximum
+						continue
+					else:
+						# we've run off the end of the needle as well
+						break
+			# they do match, collect them
+			nibbles.append(needle_nibble)
+			needle_head += needle_nibble['offset'] + 1
+			haystack_head += haystack_nibble['offset'] + 1
+			if needle_head + needle_offset > haystack_offset:
+				# we just crossed over into the haystack
+				# we have completely succeeded
+				best = {'ok': True, 'needle': needle_offset, 'haystack': haystack_offset, 'nibbles': nibbles}
+				message('Total match: {:4d} nibbles, needle {:5d}, haystack {:5d}'.format(len(nibbles), needle_offset, haystack_offset), 2)
+				break
+	# We are done and have a best match of some sort by now (unless we skipped the search, at least).
+	# Last thing is to nibblize the whole track (in case we didn't get a total match)
+	# This can be slightly better than just nibblizing it from the outset because since we know where our best match
+	# is, we can at least align the nibbles by starting at the best match needle
+	# So I will discard all nibbles before that.  Evaluation of wisdom of this move pending.
+	offset = best['needle']
+	track_nibbles = bytearray()
+	track_timing = []
+	nibble_offsets = []
+	sync_regions = []
+	sync_start = 0
+	sync_run = 0
+	message('Doing full track nibblize and collecting timing bits.', 2)
+	message('Starting offset at {:5d}, will record track nibbles at {:5d}'.format(offset, best['haystack']), 2)
+	while offset < len(track['bits']):
+		nibble = grab_nibble(track['bits'][offset:])
+		track_nibbles.append(nibble['nibble'])
+		track_timing.append(nibble['leading_zeros'])
+		nibble_offsets.append(nibble['offset'])
+		if offset < best['needle'] + 64 or (offset > best['haystack'] - 32 and offset < best['haystack'] + 64):
+			message('Nibble: {:2x} with timing {:2d} at offset {:5d}'.format(nibble['nibble'], nibble['leading_zeros'], offset), 2)
+		if nibble['leading_zeros'] > 0:
+			# this was a long nibble, a sync byte or something more devious.
+			# if it's the first one, start recording this as a region
+			if sync_start == 0:
+				sync_start = offset
+				sync_run = 0
+			else:
+				# and if it is continuing in a region we already opened, keep track of the number of nibbles
+				sync_run += 1
+		else:
+			# this is a regular sized nibble, but if we were recording a sync region, close it
+			# offset in the sync regions list is the offset of the beginning of the first long nibble
+			if sync_start > 0:
+				sync_regions.append([sync_run, sync_start, offset])
+				sync_start = 0
+				sync_run = 0
+		offset += nibble['offset'] + 1
+		# Since we're grabbing the whole track here starting at needle, notice when we've got the best track nibbles
+		# It is >= rather than == because there's a chance we had no best match at all.
+		if offset >= best['haystack'] and not 'track_nibbles' in track:
+			track['track_nibbles'] = track_nibbles[:] # freeze it in time, don't equate the pointers
+			# message('Track nibbles stored, there are {:5d} of them'.format(len(track['track_nibbles'])), 2)
+	track['nibble_best'] = best
+	track['all_nibbles'] = track_nibbles
+	track['all_timing'] = track_timing
+	track['all_offsets'] = nibble_offsets
+	track['sync_regions'] = sync_regions
+	message('Nibbles collected. Track_nibbles is {} long.'.format(len(track['track_nibbles'])), 2)
+	message('All_nibbles is {} long.'.format(len(track['all_nibbles'])), 2)
+	# message('First few nibbles of all_nibbles: {}'.format(track_nibbles[:10]), 2)
+	# message('First few nibbles of track_nibbles: {}'.format(track['track_nibbles'][:10]), 2)
+	# message('Last few nibbles of track_nibbles: {}'.format(track['track_nibbles'][len(track['track_nibbles'])-10:]), 2)
+	# message('Nibbles in all_nibbles around end of track_nibbles: {}'.format(track_nibbles[len(track['track_nibbles'])-5: len(track['track_nibbles'])+5]), 2)
+	# Just a track's worth of nibbles
+	# track['track_nibbles'] = track_nibbles[0:(best['haystack']-best['needle'])]
+	# And then just 6656 nibbles for standard .nib format
+	track['nib_nibbles'] = (track['track_nibbles'] + track['track_nibbles'])[0:6656]
+	# message('About to leave nibblize, track nibbles is {} long'.format(len(track['track_nibbles'])), 2)
+	return track
 
 # This is primarily for the purpose of creating dsk images
 # Also useful for getting an estimate of track length.
@@ -608,13 +612,33 @@ def locate_sectors(track):
 	message('offset ADDR: vol track sector 13/16 ; ADDR/DATA: CHK=addr checksum error, ok=addr epilogue ok ', 2)
 	# TODO: Keep track of the gaps and optimal beginning of the nibble stream for nib writing.
 	# Skip the last 420 nibbles since they cannot contain a sector and this would be their third read anyway
-	stop_scan = len(track['nibbles']) - 420
+	message('There are {:4d} track nibbles'.format(len(track['track_nibbles'])), 2)
+	message('There are {:4d} total nibbles'.format(len(track['all_nibbles'])), 2)
+	# message('The first ones are {:2x} {:2x} {:2x}'.format(track['track_nibbles'][0], track['track_nibbles'][1], track['track_nibbles'][2]), 2)
+	# tack on the beginning of the track to the end so that we can handle a wrap-around
+	scan_nibbles = track['track_nibbles'] + track['track_nibbles'][0:1000]
+	scan_nibbles = track['all_nibbles']
+	# debug because the track is not lining up
+	# message('Comparing repeating track to all nibbles track', 2)
+	# message('End of track {}'.format(track['track_nibbles'][-20:]), 2)
+	# start_nibbles = track['track_nibbles'][:20]
+	# message('Start of track {}'.format(start_nibbles), 2)
+	# find_start_offset = len(track['track_nibbles'])
+	# while find_start_offset < len(track['all_nibbles'])-20:
+	# 	if track['all_nibbles'][find_start_offset:find_start_offset+20] == start_nibbles:
+	# 		message('Found start of track at offset {}.'.format(find_start_offset), 2)
+	# 		break
+	# 	find_start_offset += 1
+	# message('All nibbles end+start {}'.format(track['all_nibbles'][len(track['track_nibbles'])-5:len(track['track_nibbles'])+40]), 2)
+	stop_scan = len(track['track_nibbles']) + 500 # give it some extra room to loop around, this is at least a (16) sector big.
+	stop_scan = len(track['all_nibbles']) - 500 # no, try everything but leave out the last chunk of nibbles
 	offset = 0
 	awaiting_data = False
 	# We will keep track of the gaps between found elements, might be useful at least informationally.
 	gap = bytearray()
 	while offset < stop_scan:
-		nibfield = (track['nibbles'])[offset : offset + 14]
+		nibfield = (scan_nibbles)[offset : offset + 14]
+		# message('Looking for {} in {}'.format(bytearray(b'\xd5\xaa\x96'), nibfield), 2)
 		if nibfield[0:3] in [bytearray(b'\xd5\xaa\x96'), bytearray(b'\xd5\xaa\xb5')]:
 			# we found an address mark (d5aa96 for 16-sector, d5aab5 for 13-sector)
 			sector = {
@@ -659,7 +683,7 @@ def locate_sectors(track):
 				message('{:6d}                                '.format(offset), 2, end='')
 			# the next 342 (3.3) or 410 (3.2) nibbles will be encoded data, followed by a checksum and epilogue
 			data_length = 411 if sector['dos32'] else 343
-			nibfield = track['nibbles'][offset + 3: offset + data_length + 6]
+			nibfield = scan_nibbles[offset + 3: offset + data_length + 6]
 			sector['encoded_data'] = nibfield[:-3]
 			sector['data_epilogue'] = nibfield[-3:]
 			sector['data'] = decode_53(sector['encoded_data']) if sector['dos32'] else decode_62(sector['encoded_data'])
@@ -681,7 +705,7 @@ def locate_sectors(track):
 			offset += 6 + data_length
 		else:
 			# Keep track of the nibbles in the gap between marks we find
-			gap.append(track['nibbles'][offset])
+			gap.append(scan_nibbles[offset])
 			offset += 1
 	track['all_sectors'] = all_sectors
 	if awaiting_data:
@@ -715,10 +739,12 @@ def consolidate_sectors(track):
 	global options
 	sorted_sectors = {}
 	dos32_mode = False
-	prodos_mode = options['write_po']
+	# prodos_mode = options['write_po']
 	if options['werbose']:
 		message('Consolidating found sectors by reported sector number and checking data integrity.')
 	# collect in an array keyed by self-reported sector number, for all addresses with a proper checksum.
+	# also remember the offset of the first sector
+	first_offset = 0
 	for found_sector in track['all_sectors']:
 		if found_sector['addr_checksum_ok']:
 			# for now, just saving the sectors that had an ok address checksum.
@@ -726,6 +752,8 @@ def consolidate_sectors(track):
 			# this is actually wildly unsafe, since some early disks can boot in either 13- or 16-sector mode
 			if found_sector['dos32']:
 				dos32_mode = True
+			if first_offset == 0:
+				first_offset = found_sector['offset']
 			try:
 				# keep all copies of the sector that we find, in case we want to compare them
 				sorted_sectors[found_sector['sector']].append(found_sector)
@@ -740,25 +768,28 @@ def consolidate_sectors(track):
 	# Strategy here is to look for the shortest bit distance, but that wasn't based on much thought.
 	# Unsure whether longer would be better but if this is just used as the starting point for a search,
 	# shortest is best.
-	predicted_track_bits = 999999
+	predicted_track_bits = 0
 	for sector_number in sorted_sectors.keys():
 		base_copy = None
 		for copy in sorted_sectors[sector_number]:
 			if base_copy:
-				# offset is where the beginning of the address mark for the sector was found
-				bit_distance = ((track['offsets'])[copy['offset']] - (track['offsets'])[base_copy['offset']])
+				# offset is the bit pointer to the end of the nibble where the address mark was found.
+				# Since this is just used for distance, that's fine.  If I were using it for a start
+				# point in the bit stream, we should subtract 8 from it though.
+				bit_distance = ((track['all_offsets'])[copy['offset']] - (track['all_offsets'])[base_copy['offset']])
 				# since they should be stacked in ascending order, even if there are three copies
 				# of this sector, the closest one should be found first
-				if bit_distance < predicted_track_bits:
-					predicted_track_bits = bit_distance
+				# if they vary in bit distance numbers, we want the bigger one
+				# so long as it is a sensible track distance
+				if 50000 > bit_distance > 53000:
+					if bit_distance > predicted_track_bits:
+						predicted_track_bits = bit_distance
 			else:
 				# first copy we find is the one we will compare to
 				base_copy = copy
-	# If we found a reasonable number of predicted track bits, store for use in repeat scan
-	# If it is outside this window either a) there were two copies of this sector on the track, or
-	# b) we missed one of them.
-	if 50000 > predicted_track_bits > 53000:
-		track['predicted_track_bits'] = 50000
+	if predicted_track_bits > 0:
+		track['sector_track_bits'] = predicted_track_bits
+	track['sector_first_offset'] = first_offset
 	# report the results
 	# only bother doing this loop if we'll be able to see it (verbose), to save cycles
 	if options['verbose'] and len(sorted_sectors) > 0:
@@ -793,8 +824,8 @@ def consolidate_sectors(track):
 		# TODO: Allow for CP/M, Pascal, ProDOS skewing as well at some point
 		if dos32_mode:
 			physical_sector = logical_sector
-		elif prodos_mode:
-			physical_sector = prodos_order(logical_sector)
+		# elif prodos_mode:
+		# 	physical_sector = prodos_order(logical_sector)
 		else:
 			physical_sector = dos_order(logical_sector)
 		try:
@@ -930,122 +961,261 @@ def translate_53(nibble):
 		translation = 0x00
 	return translation
 
-# Check for a fuzzy match between candidate copies of a track.
-# This has to be as tight as possible, this is called a lot and can really slow the program down.
-# I've done everything I can think of to save cycles and fail as fast as possible
-# In principle, once we are correctly aligned, the two things that could cause a failure to match
-# are either a) the media is corrupt, b) a single bit got read twice.
-# Of course, in a string of 1s, reading one of early 1s twice won't get detected until the string of
-# 1s ends and one of them has lasted longer.  And if the string is long enoough for this to have happened
-# twice, it might not even be off by just one.  Though I imagine that is fairly rare. 
-# The way this routine works right now, it is simply looking for a statistically high match between the
-# bits, without any attempt to be smart about it.
-# Ideally, once it hits a mismatch, we have a 1 and a 0 and in the situation where the media is fine,
-# that means one of the two double-sampled a bit somewhere recently, possibly right there.
-# 01001001 01010011 <- looks like the needle has two samples of the second 0, mismatches at bit 3.
-# So, at the mismatch (bit 3), look at previous bit.  If it is the same, and if next 4 bits match by
-# doing so, safe-ish bet.  Delete and continue on.
-# 01000010 01000001 <- one of the zeros was double-sampled, only caught at the end, but same procedure
-# should work.
-# Ok, so I will try to implement that algorithm:
-# If there is a mismatch, don't fail immmediately, instead:
-# set patient to the bitstream (of needle, haystack) for which the mismatch bit duplicates the prior bit
-# set doctor to the other bitstream
-# see if doctor's bits from mismatch to mismatch+3 match patient's bits from mismatch+1 to mismatch+4
-# if they don't, surgery won't help, possibly a bad media problem.
-# if they do, remove mismatch bit from patient and continue checking.
-# in the event surgery would not help, just fail.  Maybe later try to diagnose localized bad media
-# by looking ahead many bits in the future and see if we're back in sync.
-# This would now be doing the "repair" work that a separate routine was tasked with before, so
-# should possibly respect the "don't repair" switch.  At the cost of more cycles.
-# And, actually, it looks like it might be possible that there is tripling.  Some of my surgeries look
-# like they'd be solved if I allowed 000 to turn into 0.  Hmm.
-three_ones = bytearray(b'\x01\x01\x01')
-def check_match(needlebits, haystackbits):
-	'''Check for a match between needlebits and haystackbits'''
-	global three_ones
-	# This match check will succeed if they match, but also tries to accommodate the random bits
-	# that can arise from the Disk II controller.  I believe the 5.25 controller does not have this random
-	# bits problem (spurious 1 appearing after a series of zeros due to increasing gain).
-	# Much more likely as far as I can tell is that bits can be missed (disk too fast) or doubled (disk too slow)
-	# First, if they're actually equal then we're done already
-	if needlebits == haystackbits:
-		return {'needlebits': needlebits, 'haystackbits': haystackbits}
-		return True
-	# If we can't even match the first bit, fail now.
-	if needlebits[0] != haystackbits[0]:
-		return False
-	# If this is at least long enough that we got some initial matches,
-	# start reporting the surgeries
-	report_surgery = (len(needlebits) > 1900)
-	fix_window = 3
-	for offset in range(1, len(needlebits)):
-		if offset+fix_window < len(needlebits) and offset+fix_window < len(haystackbits):
-			if not haystackbits[offset] == needlebits[offset]:
-				if haystackbits[offset-1] == haystackbits[offset]:
-					# haystack has the duplicate bit
-					if haystackbits[offset+1:offset+fix_window+1] == needlebits[offset:offset+fix_window]:
-						# surgery will bring them back in sync, so do it
-						if report_surgery:
-							message('Haystack dup {:1d}: Fixed at {:5d}'.format(haystackbits[offset], offset), 2)
-						del haystackbits[offset]
-					else:
-						# check to see if a double bitectomy would help
-						if haystackbits[offset+2:offset+fix_window+2] == needlebits[offset:offset+fix_window]:
-							# it does.  Amazing.
-							if report_surgery:
-								message('Haystack dupdup {:1d}: Fixed at {:5d}'.format(haystackbits[offset], offset), 2)
-							del haystackbits[offset]
-							del haystackbits[offset]
-						else:
-							# surgery does not help
-							# fail now
-							if report_surgery:
-								message('Haystack dup {:1d}: Surgery wont help at {:5d}: haystack {}, needle {}'.format(\
-									haystackbits[offset], offset, \
-									haystackbits[offset+1:offset+5+fix_window], needlebits[offset:offset+4+fix_window]), 2)
-							return False
-				else:
-					# needle has the duplicate bit
-					if haystackbits[offset:offset+fix_window] == needlebits[offset+1:offset+1+fix_window]:
-						# surgery will bring them back in sync, so do it
-						if report_surgery:
-							message('Needle dup {:1d}: Fixed at {:5d}'.format(needlebits[offset], offset), 2)
-						del needlebits[offset]
-					else:
-						# check to see if a double bitectomy would help
-						if haystackbits[offset:offset+fix_window] == needlebits[offset+2:offset+fix_window+2]:
-							# it dows. Amazing.
-							if report_surgery:
-								message('Needle dupdup {:1d}: Fixed at {:5d}'.format(needlebits[offset], offset), 2)
-							del needlebits[offset]
-							del needlebits[offset]
-						else:
-							# surgery does not help
-							# fail now
-							if report_surgery:
-								message('Needle dup {:1d}: Surgery wont help at {:5d}: haystack {}, needle {}'.format(\
-									needlebits[offset], offset, \
-									haystackbits[offset:offset+4+fix_window], needlebits[offset+1:offset+5+fix_window]), 2)
-							return False
-	# if we made it this far out, it was a total match modulo surgery
-	return {'needlebits': needlebits, 'haystackbits': haystackbits}
-	return True
-	# New algorithm above, following code does not get executed
-	# If the match wasn't exact, we need to scan
-	# At first I was trying to deal with the possibility of getting a spurious 1
-	# Now I'm just going for a high degree of match.
-	# If we make it all the way through, we matched
-	score = 50 # five bits for free
-	for offset in range(0, len(needlebits)):
-		if haystackbits[offset] == needlebits[offset]:
-			score += 1
-		else:
-			if score <= 20:
-				# matched = False
+# This will take the EDD stream, and try to (a) find the point where the track repeats,
+# and (b) clean up any double-sampled bits.  Because the EDD file simply reports what the
+# head has seen every 32 cycles, if a drive is running at all slow, there is a possibility of getting
+# some double-sampled bits.  Obviously it is necessary to find the repeat point in the process if
+# we're going to do this cleaning, since it requires comparing two bit streams that are supposed to
+# be the same.
+# It is my understanding that on the physical media, a zero is indicated by a long steady value and
+# a one is indicated by a zero crossing.  Therefore, the most likely event is probably that a spurious
+# zero is inserted, less likely that a spurious 1 is inserted.  I will attempt to clean the track using
+# this as a heuristic
+def clean_bits(track):
+	'''Analyze a track to find the repeat points and clean bits when repeat is found'''
+	global options
+	bits = track['bits'] # the original bits that the EDD card read
+	bit_length = len(bits)
+	# We'll try a few different needle points to try to get the best read.
+	# Since I don't believe this will matter much, only a few different needle tries.
+	needle_offset = 0
+	needle_advance = 5000
+	stop_needle = 52500
+	# my observational guesses at the minimum and maximum number of bits a track could have.
+	track_minimum = 50500
+	track_maximum = 52500
+	# don't push the haystack past the point where a whole image is no longer available
+	stop_haystack = len(bits) - track_maximum
+	best_progress = {'ok': False, 'progress': 0, 'needle_offset': 0, 'haystack_offset': 0, 'bits': {}}
+	while needle_offset < stop_needle:
+		# start the search at what is approximately the minimum length a track might be
+		haystack_offset = needle_offset + track_minimum
+		# but actually if we're at a point where a whole second sample can no longer be available, bail
+		# This would only arise if we've been through the search loop several times.
+		if haystack_offset > stop_haystack:
+			break
+		# don't push the haystack beyond the longest a track could be
+		while haystack_offset < needle_offset + track_maximum:
+			repaired_bits = match_surgery(\
+				bits[needle_offset: haystack_offset], \
+				bits[haystack_offset: haystack_offset + (haystack_offset - needle_offset)])
+			if repaired_bits['ok'] or repaired_bits['progress'] > best_progress['progress']:
+				best_progress = {'ok': repaired_bits['ok'], 'progress': repaired_bits['progress'], \
+					'needle_offset': needle_offset, 'haystack_offset': haystack_offset, 'bits': repaired_bits}
+				message('Current best: {:5d} bits, needle {:5d}, haystack {:5d}'.format(best_progress['progress'], needle_offset, haystack_offset), 2)
+			if best_progress['ok']:
+				# these two spans "completely" matched after surgeries
 				break
-			score -= 20
-	return (score > 20)
+			haystack_offset += 1
+		# if we didn't reach a total match by scanning all the haystack values try pushing the needle a bit and trying again
+		# the only obvious circumstance this would help in is if the first 20 bits need surgery on the first pass.
+		if best_progress['ok']:
+			break
+		needle_offset += needle_advance
+		message('Bit needle pushed forward, to {:5d}.'.format(needle_offset), 2)
+	# We've either got a total match, or done as many total scans as we are going to
+	track['bit_match'] = best_progress['ok']
+	track['bit_progress'] = best_progress['progress']
+	if best_progress['ok']:
+		# total match
+		message('Found exact copy of bitstream (required {} repairs). {:5d} bits.'.format(\
+			len(best_progress['bits']['surgeries']), len(best_progress['bits']['needle'])), 2)
+		display_bits('          Bits : ', track['bits'][haystack_offset-20:haystack_offset+20], 2)
+		display_bits('    Needle end : ', best_progress['bits']['needle'][-20:], 2)
+		display_bits('Haystack start :                     ', best_progress['bits']['haystack'][:20], 2)
+		# counterintuitively, we will cut the track down to three copies, since a valid nibble might span the boundary.
+		track['bits'] = best_progress['bits']['needle'] + best_progress['bits']['haystack'] + best_progress['bits']['needle']
+		track['bit_needle'] = 0
+		track['bit_haystack'] = len(best_progress['bits']['needle'])
+	else:
+		# this was something less than a total match
+		if best_progress['progress'] == 0:
+			# This was a complete failure, no match at all.  Hard to believe.  Though it does happen.  Unformatted track?
+			# Guess we'll just take a wild swinging guess, though it probably won't matter
+			message('No bit match could be found at all!', 2)
+			track['bit_needle'] = 0
+			track['bit_haystack'] = 51500
+		else:
+			message('Best bit match was {} (required {} repairs)'.format(\
+				best_progress['progress'], len(best_progress['bits']['surgeries'])), 2)
+			if best_progress['progress'] > 30000:
+				# over half the track was a match, so keep the repairs that we did
+				# by making the bit stream just the repaired bits
+				# This is kind of hazardous, but I hope that the threshold is conservative enough
+				message('Bit match was good enough to use for further analysis.', 2)
+				track['bits'] = best_progress['bits']['needle'] + best_progress['bits']['haystack'] + best_progress['bits']['needle']
+				track['bit_needle'] = 0
+				track['bit_haystack'] = len(best_progress['bits']['needle'])
+			else:
+				# kind of a weak match on the length
+				# weak enough that the repairs can't really be trusted, so remember the best
+				# needle and haystack pointers, but do not change the official bits
+				track['bit_needle'] = best_progress['needle_offset']
+				track['bit_haystack'] = best_progress['haystack_offset']
+	# Now that we have pinned down where the track boundaries are, do another pass at surgery and collect the track stats
+	# Primarily, this is because when we're sizing the track, surgery is only done up to the best match, so a bunch of weak
+	# bits would stop the surgery from reaching the end of the track.
+	repaired_bits = match_surgery(\
+		track['bits'][track['bit_needle']:track['bit_haystack']], \
+		track['bits'][track['bit_haystack']: 2*track['bit_haystack'] - track['bit_needle']], True)
+	# only bother with this if we will be able to see it
+	if options['verbose']:
+		message('***** Track structure and repair summary:', 2)
+		for msg in [\
+				['Spurious 0s in needle:', repaired_bits['surgeries']['needle_zeros']], \
+				['Spurious 0s in haystack:', repaired_bits['surgeries']['haystack_zeros']], \
+				['Dropped bits in needle:', repaired_bits['surgeries']['needle_drops']], \
+				['Dropped bits in haystack:', repaired_bits['surgeries']['haystack_drops']], \
+				]:
+			message(msg[0], 1, end=' ')
+			for offset in msg[1]:
+				message('{}'.format(offset), 1, end=' ')
+			message('', 1)
+		message('Spans of weak bits: ', 1)
+		for span in repaired_bits['surgeries']['weak_spans']:
+			message('{}-{} '.format(span[0], span[1]), 1)
+			# message('{}-{} '.format(span[0], span[1]), 2, end='')
+		message('', 1)
+	track['repaired_bits'] = repaired_bits
+	return track
+
+def match_surgery(needle, haystack, skip_weak = False):
+	'''Look for a match between needle and haystack, performing minor surgery if needed'''
+	success = False
+	surgeries = {'needle_drops': [], 'haystack_drops': [], 'needle_zeros': [], 'haystack_zeros': [], 'weak_spans': []}
+	# First check the first 20 bits.  If they don't match, then fail right away
+	if needle[0:20] != haystack[0:20]:
+		progress = 0
+	# If we were already equal from the outset without any surgery, succeed right away
+	elif needle == haystack:
+		progress = len(needle)
+		success = True
+	# Otherwise, we need to loop and maybe repair
+	else:
+		offset = 0
+		check_window = 10
+		stop_offset = len(needle)
+		weak_span_start = -1
+		weak_span_closing = 0
+		needed_to_close = 30
+		while offset < stop_offset:
+			if needle[offset] == haystack[offset]:
+				# they match.  If we're collecting weak spans and one was open, close it
+				if skip_weak and weak_span_start > -1:
+					weak_span_closing += 1
+					if weak_span_closing > needed_to_close:
+						# enough consecutive good bits have come in that we can declare the weak span closed
+						surgeries['weak_spans'].append([weak_span_start, offset - weak_span_closing - 1])
+						weak_span_start = -1
+			else:
+				# no match, check to see if we can repair it
+				# since 1s represent transitions, my reasoning is that it's *most* likely that
+				# a mismatch would be due to an extra 0 in the stream.
+				# we shall see whether I am right or not.
+				# to see whether a repair was successful, we see whether future bits are in sync again
+				future_offset = offset + 20
+				needle_future = needle[future_offset: future_offset + check_window]
+				needle_present = needle[offset: offset + check_window]
+				haystack_future = haystack[future_offset: future_offset + check_window]
+				haystack_present = haystack[offset: offset + check_window]
+
+				future_offset2 = future_offset + 1
+				needle_future2 = needle[future_offset2: future_offset2 + check_window]
+				haystack_future2 = haystack[future_offset2: future_offset2 + check_window]
+
+				# first, if the futures are in sync already, then we have one bit that was mis-read.
+				# assume that it is a missed transition (vs. a single weak bit)
+				# and repair it to 1.
+				if needle_future == haystack_future:
+					if needle[offset] == 0:
+						surgeries['needle_zeros'].append(offset)
+						message('needle missed transition at {}'.format(offset), 2)
+					else:
+						surgeries['haystack_zeros'].append(offset)
+						message('haystack missed transition at {}'.format(offset), 2)
+					needle[offset] = 1
+					haystack[offset] = 1
+					# trying an alternative: haystack wins
+					# needle[offset] = haystack[offset]
+				# check if cutting out a 0 will put the streams in sync.
+				# if so, do it and continue
+				# elif needle_present == haystack_future and haystack[offset] == 0:
+				# elif needle_future == haystack_future2 and haystack[offset] == 0:
+				# actually, forget the 0, see if just cutting any bit will put them in sync
+				elif needle_future == haystack_future2:
+					message('haystack {} removed at {}'.format(haystack[offset], offset), 2)
+					del haystack[offset]
+					if len(haystack) < len(needle):
+						stop_offset -= 1
+					surgeries['haystack_drops'].append(offset)
+					# message('haystack 0 removed at {}'.format(offset), 2)
+				# elif haystack_present == needle_future and needle[offset] == 0:
+				# elif haystack_future == needle_future2 and needle[offset] == 0:
+				elif haystack_future == needle_future2:
+					message('needle {} removed at {}'.format(needle[offset], offset), 2)
+					del needle[offset]
+					if len(needle) < len(haystack):
+						stop_offset -= 1
+					surgeries['needle_drops'].append(offset)
+					# message('needle 0 removed at {}'.format(offset), 2)
+				# see if maybe calling two bits weak bits will bring us back in sync
+				# elif needle_future2 == haystack_future2:
+				# 	if needle[offset] == 0 and needle[future_offset] == 0:
+				# 		surgeries.append([offset, 'needle missed two transitions'])
+				# 		message('needle missed two transitions at {}'.format(offset), 2)
+				# 	elif needle[offset] == 0 and haystack[future_offset] == 0:
+				# 		surgeries.append([offset, 'needle, then haystack, missed a transition'])
+				# 		message('needle, then haystack, missed a transition at {}'.format(offset), 2)
+				# 	elif haystack[offset] == 0 and needle[future_offset] == 0:
+				# 		surgeries.append([offset, 'haystack, then needle, missed a transition'])
+				# 		message('haystack, then needle, missed a transition at {}'.format(offset), 2)
+				# 	else:
+				# 		surgeries.append([offset, 'haystack missed two transitions'])
+				# 		message('haystack missed two transitions at {}'.format(offset), 2)
+				# 	# assume that 1 is correct (missed transitions)
+				# 	# though maybe 10 or 01 might be better?  Or something even more subtle?  Hmm.
+				# 	needle[offset] = 1
+				# 	needle[future_offset] = 1
+				# 	haystack[offset] = 1
+				# 	haystack[future_offset] = 1
+				else:
+					if skip_weak:
+						if weak_span_start == -1:
+							# this is the first weak bit we've found so far, open the span
+							weak_span_start = offset
+						# every time we get a weak bit reset the count of good bits we need to close it
+						weak_span_closing = 0
+					else:
+						# now we are at a harder decision point
+						# if we are too lenient with our repairs, we could incorrectly elevate the match count
+						# and wind up thinking we have the track repeat when we don't (and butcher the track in the process)
+						# on the other hand, we might have a bad spot in the media that the needle push wouldn't catch.
+						# at this point, we are facing either a spurious 1 or a span of mismatches.
+						# when we're trying to determine if we have a span of mismatches, we can't be satisfied with just
+						# one match.  There are only two values, accidental matches would be pretty easy.
+						# So for the moment, just plain bail if these simple fixes don't work.
+						# Maybe we can do something more sophisticated about weak bits once we are sure where the track is.
+						if offset > 20000:
+							# we made it over halfway before we had to bail
+							# display what made it fail so I can try to see what kind of repair might be warranted
+							message('Irreparable bit mismatch at {}.'.format(offset),2)
+							display_bits('    Needle bits   : ', needle_future, 2)
+							display_bits('    Haystack bits : ', haystack_future, 2)
+						break
+			offset += 1
+		if offset == stop_offset:
+			# we made it all the way through, this is a total match.
+			# but we did stop a few bits short of the end, and needle and haystack may now be slightly different lengths
+			# needle needs to go all the way to haystack, but the stuff at the end of haystack can be replaced
+			# so tack the bits from the end of needle onto the end of haystack so they match
+			haystack[offset:] = needle[offset:]
+			progress = len(needle)
+			success = True
+		else:
+			# we got kicked out for mismatching before the end
+			progress = offset - 1
+
+	return {'ok': success, 'progress': progress, 'needle': needle, 'haystack': haystack, 'surgeries': surgeries}
 
 def analyze_sync(track):
 	'''Find regions of sync bits on a track'''
@@ -1065,6 +1235,9 @@ def analyze_sync(track):
 		prev_run = 999999 # guarantees that the first run printed will generate a label
 		columns = 0
 		for run in sorted_sync_regions:
+			# do not bother printing all the 0 and 1 sync regions
+			if run[0] < 2:
+				break
 			# group runs of the same length together.
 			if prev_run > run[0]:
 				# this length is different, so new label line.
@@ -1094,7 +1267,7 @@ def analyze_sync(track):
 		for syncs in [[0,1], [0,2], [1,2]]:
 			first = sorted_sync_regions[syncs[0]]
 			second = sorted_sync_regions[syncs[1]]
-			# are they close enough in terms of how long the sync spans are (within 3)?
+			# are they close enough in terms of how long the sync spans are?
 			if abs(first[0] - second[0]) < 3:
 				# yes, so do they end about a track apart?
 				# get them in the right order and check.
@@ -1108,482 +1281,19 @@ def analyze_sync(track):
 				if 50500 < (sync_haystack - sync_needle) < 52500:
 					# yes, they are about a track apart
 					# so mark this as the cut point and return
-					track['sync_needle'] = sync_needle
-					track['sync_haystack'] = sync_haystack
-					# nibbles should start just after the needle
-					track['sync_nibstart'] = sync_needle + 1
+					track['sync_start'] = sync_needle
+					track['sync_repeat'] = sync_haystack
 					return track
 	else:
 		# I get this sync regions message more often than I'd have guessed I would.
 		# It would seem to mean that the track was absolutely all zeros
-		message('Not enough sync regions to even work with here.')
+		message('Sync nibble analysis not performed, not enough sync regions found to work with.')
 	# If the easy guess (using the top three sync regions) did not work, then we could get into some
 	# more complex stuff to try to work this out.
 	# This has not seemed very reliable so far, so for the moment, I'll bail out early so I can eyeball it.
 	# By hand, I can see in Jawbreaker strings of 10 syncs mostly separated by 2990 but with a 6251 and a
 	# 17931 interspersed.  So, the complex analysis should see that too, and take the distance between the
 	# spaced-out regions as the track length.
-	if True:
-		return track
-	# never gets here, yet.
-	if len(runs) > 1:
-		if abs((runs[0])[0] - (runs[1])[0]) < 3 and (runs[0])[0] > 90:
-			sync_haystack = (runs[1])[1]
-			sync_needle = (runs[0])[1]
-			if sync_needle > sync_haystack:
-				sync_needle = sync_haystack
-				sync_haystack = (runs[0])[1]
-			# if the distance is implausibly far, sync may have been caught three times
-			if sync_haystack - sync_needle > 52500:
-				# so grab the next one down and use that.  There can't be more than three.
-				sync_haystack = (runs[2])[1]
-				if sync_needle > sync_haystack:
-					sync_haystack = sync_needle
-					sync_needle = (runs[2])[1]
-			# if what we wound up with is plausible, store it
-			if 50500 < (sync_haystack - sync_needle) < 52500:
-				track['sync_needle'] = sync_needle
-				track['sync_haystack'] = sync_haystack
-				track['sync_nibstart'] = (runs[0])[2]
-				# TODO: Check to be sure I got the first pass nibble start there.
-			else:
-				message('Track {} implausible sync distance. Needle {}, haystack {}, length {}'.format( \
-					track['track_number'], sync_needle, sync_haystack, sync_haystack - sync_needle), 1)
-		else:
-			message('Track {} no sufficiently long and consistent sync runs to use for track size'.format(track['track_number']), 1)
-	else:
-		message('Track {} essentially no sync runs to use for track size'.format(track['track_number']), 1)
-	return track
-
-def set_track_points_to_sync(track):
-	'''Use track sync information to set the needle and haystack values'''
-	global options
-	global three_ones
-	# Initially, I had this backing up by sync regions.  This may be too complex.
-	# Right now, I'm going to try just backing up absolutely how far is necessary.
-	sync_needle = track['sync_needle']
-	sync_haystack = track['sync_haystack']
-	sync_length = sync_haystack - sync_needle
-	bit_length = len(track['bits'])
-	retreat = 8 + sync_haystack + sync_length - bit_length
-	if retreat > 0:
-		# haystack runs off the end of the bits
-		# so back needle and haystack up such that they will fit
-		sync_needle -= retreat
-		sync_haystack -= retreat
-	# save them as the definitive start points for the track and its second copy
-	track['match_needle'] = sync_needle
-	track['match_haystack'] = sync_haystack
-	track['match_bits'] = 0
-	return track	
-	# The rest of this will not execute for now, it is the more complex version.
-	bits = track['bits']
-	bit_length = len(bits)
-	# A prior computation should have already found the syncs if we got here.
-	# I am going to trust these if I found them, only turning to the hard math if necessary.
-	# HOWEVER, it is easily possible for these sync regions to be placed such that we don't
-	# have two contiguous tracks after the first one.  If first sync is between about 25000
-	# and 52000 samples in, we have to back up.
-	sync_needle = track['sync_needle']
-	sync_haystack = track['sync_haystack']
-	# if we have to back up, back up by sync runs until we're in range
-	# locate the positions of the major sync boundary in the sync runs list
-	sync_offsets = [x[1] for x in track['sync_regions']]
-	sync_needle_index = sync_offsets.index(sync_needle)
-	sync_haystack_index = sync_offsets.index(sync_haystack)
-	while sync_haystack + 52500 > bit_length:
-		message('Haystack sync mark too far forward.  Will retreat.  Needle: {:6d} Haystack: {:6d} Distance: {:6d}'.format(\
-			sync_needle, sync_haystack, sync_haystack - sync_needle), 2)
-		sync_needle_index -= 1
-		sync_haystack_index -= 1
-		sync_needle = sync_offsets[sync_needle_index]
-		sync_haystack = sync_offsets[sync_haystack_index]
-	message('Sync marks now say: Needle: {:6d} Haystack: {:6d} Distance: {:6d}'.format(\
-		sync_needle, sync_haystack, sync_haystack - sync_needle), 1)
-	if options['verbose']:
-		message('Sync based track structure looks like:', 1)
-		display_needle = sync_needle_index
-		display_haystack = sync_haystack_index
-		sync_diff = sync_haystack_index - sync_needle_index
-		prev0 = track['sync_runs_sequential'][sync_needle_index][1]
-		prev1 = track['sync_runs_sequential'][sync_haystack_index][1]
-		columns = 0
-		sync_runs = len(track['sync_runs_sequential'])
-		while display_needle < sync_haystack_index - 1:
-			needle_run = track['sync_runs_sequential'][display_needle]
-			run0 = needle_run[0]
-			off0 = needle_run[1]
-			diff0 = off0 - prev0
-			if display_haystack < sync_runs:
-				haystack_run = track['sync_runs_sequential'][display_haystack]
-				run1 = haystack_run[0]
-				off1 = haystack_run[1]
-				diff1 = off1 - prev1
-			else:
-				off1 = 0
-				run1 = 0
-				diff1 = 0
-			if off1 > sync_haystack + sync_haystack - sync_needle:
-				message('!', 1, end = '')
-			else:
-				message(' ', 1, end = '')
-			message("{:5d}:{:5d}...[{:3d}:{:3d}]...".format(diff0, diff1, run0, run1), 1, end='')
-			prev0 = off0
-			prev1 = off1
-			display_needle += 1
-			display_haystack += 1
-			# if diff0 is less than half diff1 then advance needle again
-			if diff0 < diff1 / 2:
-				off = track['sync_runs_sequential'][display_needle][1]
-				message('>>{}: '.format(off - prev0), 1)
-				prev0 = 0
-				display_needle += 1
-				columns = 0
-			# same for run1
-			if display_haystack < sync_runs:
-				if diff1 < diff0 / 2:
-					off = track['sync_runs_sequential'][display_haystack][1]
-					message('>>:{} '.format(off - prev1), 1)
-					prev1 = off
-					display_haystack += 1
-					columns = 0
-			columns += 1
-			if columns > 4:
-				message('', 1)
-				columns = 0
-		message('', 1)
-	# We should have backed up enough by now that a full track is available from both
-	# sync_needle and sync_haystack
-	# save them as the definitive start points for the track and its second copy
-	track['match_needle'] = sync_needle
-	track['match_haystack'] = sync_haystack
-	track['match_bits'] = 0
-	return track	
-
-# Finding the repeats in the raw EDD data is actually somewhat of a challenge because the raw bits that
-# come in are understandably very timing dependent.  Slower drives read more raw bits, and even beyond
-# the basic speed adjustment of the drive, the drive does vary a bit even at a micro level.  But the EDD
-# card will read whatever is there every 32 cycles.  Since the advice is generally to run the drive a
-# little bit slow, odds are high that rather than missing any bits, there will be an occasional bit that
-# is read twice.  Since we're reading each track approximately 2.5 times per sample we can make a comparison
-# to try to rectify double reads of this sort, but it's all zeros and ones.
-def find_repeats(track):
-	'''Analyze a track to find the repeat points'''
-	global options
-	global three_ones
-	bits = track['bits']
-	bit_length = len(bits)
-	# This is actually a fairly hard problem because the bit read can be different on each pass
-	# If we actually are just going to copy the whole track, then just do that
-	if options['no_translation']:
-		track['match_needle'] = 9
-		track['match_haystack'] = len(bits) - 8
-		track['match_bits'] = len(bits) - 8
-	elif 'sync_needle' in track:
-		# If we found a long region of sync nibbles about a track apart, then
-		# use those to define the track size.  The following function will back the
-		# pointers up if needed and record the result as match_needle/match_haystack.
-		track = set_track_points_to_sync(track)
-	else:
-		# If we didn't get a good guess from the sync and we're actually cutting the
-		# track, then we have to do some further analysis.
-		# We'll try a few different needle points to try to get the best read
-		# Currently defined as starting at the beginning, advancing by about an
-		# eighth of a revolution, up to a half revolution.
-		needle_offset = 0
-		needle_advance = 6400
-		stop_needle = 26000
-		# If we did a sector analysis and got something, we will have a predicton about the
-		# track size based on the bits that elapse between sector repeats.
-		# This should actually be a pretty reliable number, but for the moment I'm just taking
-		# it to be the start of the search length.  If it was accurate, we should succeed more or
-		# less immediately.
-		if 'predicted_track_bits' in track:
-			track_minimum = track['predicted_track_bits']
-			message('Sector scan predicts repeat at minimum {:d}'.formate(track['predicted_track_bits']), 2)
-		else:
-			# if we have nothing to go by, pick a lowish but reasonable start length
-			track_minimum = 50500
-		# don't push the haystack past the point where a whole image is no longer available
-		stop_haystack = len(bits) - track_minimum
-		# window0 is quick search size
-		# window1-3 are sufficient, good, best matches
-		# not in an array to save a very small numbers of cycles
-		window0 = 1600
-		window1 = 3200
-		window2 = 12800
-		window3 = 25600
-		track['match_bits'] = 0
-		found_match = False
-		track['match_hits'] = [0, 0, 0, 0]
-		while needle_offset < stop_needle:
-			# start the search at what is approximately the minimum length a track might be
-			haystack_offset = needle_offset + track_minimum
-			# but actually if we're at a point where a whole second sample can no longer be available, bail
-			# This would only arise if we've been through the search loop several times.
-			if haystack_offset > stop_haystack:
-				break
-			# prefetch the comparison windows before we get into the loop
-			stop0 = needle_offset + window0
-			stop1 = needle_offset + window1
-			stop2 = needle_offset + window2
-			needle0 = bits[needle_offset: stop0]
-			needle1 = bits[stop0: stop1]
-			needle2 = bits[stop1: stop2]
-			needle3 = bits[stop2: needle_offset + window3]
-			# don't push the haystack beyond the longest a track could be (I'm guessing an approximation)
-			stop_offset = needle_offset + 52500
-			while haystack_offset < stop_offset:
-				stop0 = haystack_offset + window0
-				repaired_bits = check_match(needle0, bits[haystack_offset: stop0])
-				if repaired_bits:
-					message('Short match at haystack {:5d}'.format(haystack_offset), 2)
-					(track['match_hits'])[0] += 1
-					# stop1 = haystack_offset + window1
-					# if check_match(needle1, bits[stop0: stop1]):
-					repaired_bits = check_match(repaired_bits['needlebits'][0:window0+window1], repaired_bits['haystackbits'][0:window0+window1])
-					if repaired_bits:
-						message('Medium match at haystack {:5d}'.format(haystack_offset), 2)
-						(track['match_hits'])[1] += 1
-						# We got a match sufficient to call the repeat
-						found_match = True
-						# stop2 = haystack_offset + window2
-						# if check_match(needle2, bits[stop1: stop2]):
-						repaired_bits = check_match(repaired_bits['needlebits'][0:window0+window1+window2], repaired_bits['haystackbits'][0:window0+window1+window2])
-						if repaired_bits:
-							message('Long match at haystack {:5d}'.format(haystack_offset), 2)
-							(track['match_hits'])[2] += 1
-							if check_match(needle3, bits[stop2: haystack_offset + window3]):
-								(track['match_hits'])[3] += 1
-								track['match_bits'] = window3
-								track['match_needle'] = needle_offset
-								track['match_haystack'] = haystack_offset
-								# this is as good as we can hope for, stop looking
-								break
-							else:
-								# if this is a level better than a previous match save this as current best
-								if track['match_bits'] < window2:
-									track['match_bits'] = window2
-									track['match_needle'] = needle_offset
-									track['match_haystack'] = haystack_offset
-						else:
-							# if this is a level better than a previous match save this as current best
-							if track['match_bits'] < window1:
-								track['match_bits'] = window1
-								track['match_needle'] = needle_offset
-								track['match_haystack'] = haystack_offset
-				haystack_offset += 1
-			# we don't look for anything better than the best bitmatch, so if we found one, don't push on
-			if (track['match_hits'])[3] > 0:
-				break
-			needle_offset += needle_advance
-		if not found_match:
-			# if we still didn't find a match even after pushing the needle, either write the whole thing
-			# or treat it as unformatted.  We can't do anything with this track.
-			if options['write_full']:
-				track['match_needle'] = 0
-				track['match_haystack'] = len(bits) - 8
-				track['match_bits'] = len(bits) - 8
-			elif options['use_slice']:
-				track['match_needle'] = 0
-				track['match_haystack'] = 51400 # just a guess, best of a bad situation
-				track['match_bits'] = 51400
-			else:
-				track['match_needle'] = 0
-				track['match_haystack'] = 0
-				track['match_bits'] = 0
-		track['match_found'] = found_match
-	track['data_bits'] = track['match_haystack'] - track['match_needle']
-	# Analyze bit differences and repair the bit stream
-	# permanently disable repair for the moment because it happens during compare.
-	if options['repair_tracks'] and False:
-		track = repair_bitstream(track)
-		# since this may have changed during the repair, recompute the length
-		track['data_bits'] = track['match_haystack'] - track['match_needle']
-	# TODO: I'm getting some negative numbers here occasionally, something is not logically correct here.
-	# compute the byte information for the bitstream for the fdi file
-	# for this I will re-ecode the bytes from the slice of the bitstream
-	# If needle was zero, this is in principle identical to what was in the EDD file
-	fdi_bytes = bytearray()
-	byte_offset = track['match_needle']
-	haystack_offset = track['match_haystack']
-	if haystack_offset > 0:
-		if options['spiral']:
-			# advance about a third of turn into the track on each quarter track, an attempt to help sync
-			# This is actually a bit risky because it could advance past end of data window.  Particularly w/ -2.
-			# TODO: Check for that someday.
-			# Testing out on Jawbreaker (spiradisc), didn't work: 17000, 18000, 17250, 17750, 20000, 20006
-			# Jawbreaker track zero should be 51091 bits long
-			# track zero 17931-separated sync is 20007 bits later on track 0.25 read than on track 0 read.
-			# so track .25 should be shifted about 2.55ths of a track back.
-			# we have about 6.5 "shifts" of this length worth of bits available.
-			# so we shift up 20007 each time, but on the third shift, we subtract out 51091
-			# so we can shift 20007, 40014, 60021, 80028, 100035
-			# or 20007, 400014, 8930, 28937, 48944, 17860
-			# this is 20007*track - length*int(track/3)
-			# mathematically, the following works, but Jawbreaker doesn't boot.
-			quarter_track_number = int(4 * track['track_number'])
-			track_length = 51091
-			advance = 20007 * quarter_track_number - track_length*int(quarter_track_number/3)
-			message('advance is {}'.format(advance), 0)
-		else:
-			advance = 0
-		if options['use_second']:
-			bits = track['bits'][track['match_haystack'] + advance: track['match_haystack'] + track['data_bits'] + advance]
-		else:
-			bits = track['bits'][track['match_needle'] + advance: track['match_haystack'] + advance]
-		fdi_bytes = bits_to_bytes(bits)
-	track['fdi_bytes'] = fdi_bytes
-	return track
-
-def repair_bitstream(track):
-	'''Analyze bit streams and attempt to repair bit slippage'''
-	# My impression from seeing this operate is that it is actually more likely on my setup at least
-	# for bits to be doubled rather than to slip.  I think this is probably a function of the drive
-	# speed.  It also (again observationally) seems that the later read is more likely to double a bit.
-	# So if by removing a bit from haystack we can get them to match, then prefer to do that.
-	# Though I think this is too optimistic.  It is hard to discern a pattern in the bit mismatches.
-	# Best option would be to try for a triple match and let them vote, at least for the half a track
-	# that we have a triple sample of.
-	global options
-	bits = track['bits']
-	# Analyze bit differences and report in werbose mode	
-	track_length = track['match_haystack'] - track['match_needle']
-	if track_length == 0:
-		message('Bit differences not computed, track treated as unformatted.', 2)
-	elif track_length > 52500:
-		message('Bit differences not computed, track using whole 2.5x read.', 2)
-	else:
-		message('Comparing track from {} to {} with track from {} to {} length {} of total bits {}'.format(\
-			track['match_needle'], track['match_haystack'], track['match_haystack'], \
-			track['match_haystack'] + track['data_bits'], track['data_bits'], len(track['bits'])), 1)
-		needle_bits = bits[track['match_needle']:track['match_haystack']]
-		haystack_bits = bits[track['match_haystack']: track['match_haystack'] + track['data_bits']]
-		# This is just a debugging message, ugly formatting
-		message('The first bunch of bits are as follows:', 2)
-		message(needle_bits[0:30], 2)
-		message(haystack_bits[0:30], 2)
-		bit_offset = 0
-		perfect_match = True
-		verify_size = 4
-		previous_offset_issue = 0
-		bit_errors = {'needle_slips': 0, 'haystack_slips': 0, 'mismatches': 0, 'haystack_doubles': 0}
-		while bit_offset < len(needle_bits) - 8:
-			proceed = True
-			window_end = bit_offset + 8
-			needle_window = needle_bits[bit_offset: window_end]
-			haystack_window = haystack_bits[bit_offset: window_end]				
-			if not (needle_window == haystack_window):
-				# there was a mismatch, can we figure out what happened?
-				perfect_match = False
-				note = '??Bits different'
-				needle_byte = bits_to_byte(needle_window)
-				haystack_byte = bits_to_byte(haystack_window)
-				eor_byte = needle_byte ^ haystack_byte
-				double_window = window_end + verify_size
-				if double_window < len(needle_bits) and double_window < len(haystack_bits):
-					# Only bother proceeding if we're not right at the end and can fix something.
-					# Locate the position of the first mismatching bit
-					mismatch_index = 0
-					while eor_byte < 128:
-						eor_byte = eor_byte << 1
-						mismatch_index += 1
-					if False:
-						# Skip this for now, only started working on it, not convinced this approach is better.
-						# Did haystack have a doubled bit?
-						# Try removing mismatched bit from haystack and see if this and next byte match now
-						needle_patch = needle_bits[bit_offset: double_window]
-						haystack_patch = haystack_bits[bit_offset: double_window + 1]
-						del haystack_patch[mismatch_index]
-						if needle_patch == haystack_patch:
-							# that solved it, haystack doubled the bit
-							# remove the bit from haystack for good
-							del haystack_bits[bit_offset + mismatch_index]
-							note = 'Haystack doubled a bit'
-							bit_errors['haystack_doubles'] += 1
-							proceed = False
-						# else:
-						# 	# That didn't solve it, but maybe 
-					# Below is what I was doing initially, which is inserting a bit or two preferentially into needle.
-					# It also checks for two bits in a row, but that is highly unlikely to work except by coincidence.
-					# It seems much more likely that two bits would be mis-read in the window but not next to each other.
-					# Did needle lose a bit?  Try removing mismatch from haystack and see if this and next byte match now
-					needle_patch = needle_bits[bit_offset: double_window - 1]
-					haystack_patch = haystack_bits[bit_offset: double_window]
-					missing_bit = haystack_patch[mismatch_index]
-					needle_patch.insert(mismatch_index, missing_bit)
-					if needle_patch == haystack_patch:
-						# that solved it, needle lost a bit
-						# add it into needle for good
-						needle_bits.insert(mismatch_index + bit_offset, missing_bit)
-						note = 'Needle lost a bit'
-						bit_errors['needle_slips'] += 1
-						proceed = False
-					else:
-						# Did needle lose two sequential bits?
-						needle_patch = needle_patch[:-1]
-						missing_bit2 = haystack_patch[mismatch_index + 1]
-						needle_patch.insert(mismatch_index + 1, missing_bit2)
-						if needle_patch == haystack_patch:
-							# that solved it, needle lost 2 sequential bits
-							# add them into needle for good
-							needle_bits.insert(mismatch_index + bit_offset, missing_bit2)
-							needle_bits.insert(mismatch_index + bit_offset, missing_bit)
-							note = 'Needle lost 2 bits'
-							bit_errors['needle_slips'] += 2
-							proceed = False
-						else:
-							# Ok, did haystack lose a bit?
-							needle_patch = needle_bits[bit_offset: double_window]
-							haystack_patch = haystack_bits[bit_offset: double_window - 1]
-							missing_bit = needle_patch[mismatch_index]
-							haystack_patch.insert(mismatch_index, missing_bit)
-							if needle_patch == haystack_patch:
-								# that solved it, haystack lost a bit
-								# add it into haystack for good
-								haystack_bits.insert(mismatch_index + bit_offset, missing_bit)
-								note = 'Haystack lost a bit'
-								bit_errors['haystack_slips'] += 1
-								proceed = False
-							else:
-								# ok, did haystack lose two sequential bits?
-								haystack_patch = haystack_patch[:-1]
-								missing_bit2 = needle_patch[mismatch_index + 1]
-								haystack_patch.insert(mismatch_index + 1, missing_bit2)
-								if needle_patch == haystack_patch:
-									# that solved it, haystack lost two sequential bits
-									# add them into haystack for good
-									haystack_bits.insert(mismatch_index + bit_offset, missing_bit2)
-									haystack_bits.insert(mismatch_index + bit_offset, missing_bit)
-									note = 'Haystack lost 2 bits'
-									bit_errors['haystack_slips'] += 2
-									proceed = False
-
-								else:
-									bit_errors['mismatches'] += 1
-				# report the mismatch
-				message('Offset:{}{:6d} needle: {:08b} haystack: {:08b} EOR: {:08b} Guess: {}'.format(\
-					'*' if bit_offset > previous_offset_issue + 8 else ' ', \
-					bit_offset, needle_byte, haystack_byte, needle_byte ^ haystack_byte, note
-					), 2)
-				previous_offset_issue = bit_offset
-				# TODO: Do something with this repaired track information when writing the real track
-			if proceed:
-				bit_offset += 8
-		if perfect_match:
-			message('No bit differences found.', 1)
-		else:
-			# There are some repairs we can do.
-			# If we got here, we are assuming that we want to do the repairs, won't have been called otherwise.
-			# This is destructive, overwrites the bits with new improved slippage-free bits
-			# TODO: Collect the information we have about weak bits, MFI can store those
-			track['bits'][track['match_haystack']: track['match_haystack'] + track['data_bits']] = haystack_bits
-			track['bits'][track['match_needle']:track['match_haystack']] = needle_bits
-			track['match_bits'] = len(needle_bits)
-			track['match_haystack'] = track['match_needle'] + track['match_bits']
-			message('Bit stream repaired (slips: {} needle, {} haystack, mismatches: {}), now needle {}, haystack {}, length {}.'.format(\
-				bit_errors['needle_slips'], bit_errors['haystack_slips'], bit_errors['mismatches'], \
-				track['match_needle'], track['match_haystack'], track['match_bits']), 1)
 	return track
 
 def bits_to_bytes(bits):
@@ -1600,7 +1310,272 @@ def bits_to_byte(bits):
 		byte = byte << 1
 		if bit == 1:
 			byte += 1
-	return byte	
+	return byte
+
+def display_bits(label, bit_array, level):
+	message(label, level, end='')
+	for i in range(0, len(bit_array)):
+		message('{:1d}'.format(bit_array[i]), level, end='')
+	message('', level)
+
+def write_dsk_file(eddfile, tracks):
+	'''Write the data out in the form of a 34-track dsk or po file'''
+	global options
+	# restore this later when po order options are put back in
+	# outfile = options['output_basename'] + ('.po' if options['write_po'] else '.dsk')
+	outfile = options['output_basename'] + '.dsk'
+	message('Writing dsk image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as dskfile:
+		for track in tracks:
+			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
+				dskfile.write(track['dsk_bytes'])
+
+def write_nib_file(eddfile, tracks):
+	'''Write the data out in the form of a 34-track nib file'''
+	global options
+	outfile = options['output_basename'] + '.nib'
+	message('Writing nib image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as nibfile:
+		for track in tracks:
+			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
+				# if 'sync_nibstart' in track:
+				# 	sync_nibstart = track['sync_nibstart']
+				# 	nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
+				# else:
+				# 	nibfile.write((track['nibbles'])[:0x1a00])
+				nibfile.write(track['nib_nibbles'])
+
+# def write_nit_file(eddfile, tracks):
+# 	'''Write the nibble timing data out in the form of a (quarter tracked) nit file'''
+# 	# nit files from I'm fEDD Up include all tracks analyzed, not just whole tracks
+# 	# This is not going to be very useful for debugging unless the nib also matches I'm fEDD Up's nib
+# 	# and actually it might not if we're starting inside the track.  So, I added this, but it might
+# 	# be worth taking out again.  Can't tell if I'll ever use it.  Just curious.
+# 	global options
+# 	outfile = options['output_basename'] + '.nit'
+# 	with open(outfile, mode="wb") as nibfile:
+# 		for track in tracks:
+# 			if 'sync_nibstart' in track:
+# 				sync_nibstart = track['sync_nibstart']
+# 				nibfile.write((track['nibbles'])[sync_nibstart: sync_nibstart + 0x1a00])
+# 			else:
+# 				nibfile.write((track['nibbles'])[:0x1a00])
+
+def write_v2d_file(eddfile, tracks):
+	'''Write the data out in the form of a half-tracked v2d/d5ni file'''
+	global options
+	outfile = options['output_basename'] + '.v2d'
+	# This in principle can store variable numbers of nibbles per track.
+	# Right now the computation of number of nibbles is not done very well, really.
+	# requires a track analysis.  For the moment, I'll just store the first 1a00 nibbles on each track.
+	# In Virtual II, it seems only to accept half (not quarter) tracks.
+	# I think it is possible to not even have enough nibbles found for even 1a00, in which case, write fewer.
+	message('Writing v2d image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as v2dfile:
+		# precompute the lengths so we can get the filesize
+		# nibs_to_write = 13312 # cheat massively - VII rejects this
+		# nibs_to_write = 7400 # cheat -- this is about as big as I've seen VII accept
+		# nibs_to_write = 7168 # cheat -- 1c00
+		# nibs_to_write = 6656 # 1a00 - standard for nib
+		filesize = 0
+		num_tracks = 0
+		for track in tracks:
+			quarter_track = int(4 * track['track_number'])
+			phase = quarter_track % 4
+			if phase == 0 or phase == 2:
+				filesize += len(track['track_nibbles'])
+				# if len(track['track_nibbles']) < nibs_to_write:
+				# 	filesize += len(track['track_nibbles'])
+				# else:
+				# 	filesize += nibs_to_write
+				# and four bytes for the track header
+				filesize += 4
+				if len(track['track_nibbles']) > 0:
+					# is it even possible to have zero nibbles, e.g., on an unformatted track?  All zeros?
+					num_tracks += 1
+				else:
+					message('No track nibbles on track {}'.format(track['track_number']), 2)					
+		# write the d5ni/v2d header
+		# filesize = len(tracks) * (nibs_to_write + 4) # (1a00 + 4) * tracks
+		v2dfile.write(struct.pack('>I', filesize)) # size of whole file
+		v2dfile.write(b"D5NI") #signature
+		v2dfile.write(struct.pack('>H', num_tracks)) # number of tracks
+		for track in tracks:
+			quarter_track = int(4 * track['track_number'])
+			phase = quarter_track % 4
+			if phase == 0 or phase == 2:
+				if len(track['track_nibbles']) > 0:
+					# assuming there are some nibbles (otherwise, skip the track)
+					# write the track header
+					v2dfile.write(struct.pack('>H', int(4 * track['track_number']))) # quarter track index
+					v2dfile.write(struct.pack('>H', len(track['track_nibbles']))) # bytes in this track
+					# if len(track['track_nibbles']) < nibs_to_write:
+					# 	# if we don't have enough nibbles around to write, then cut the track back
+					# 	v2dfile.write(struct.pack('>H', len(track['track_nibbles']))) # bytes in this track
+					# else:
+					# 	v2dfile.write(struct.pack('>H', nibs_to_write)) # bytes in this track
+					# TODO: Maybe try to use sync_nibstart like .nib writing does.  Not now, though.
+					# This should write as many nibbles as we have, if it is fewer than nibs_to_write
+					v2dfile.write(track['track_nibbles'])
+
+def write_fdi_file(eddfile, tracks):
+	'''Write the data out in the form of an FDI file'''
+	global options
+	outfile = options['output_basename'] + '.fdi'
+	message('Writing fdi image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as fdifile:
+		# Write the FDI header
+		fdifile.write(b"Formatted Disk Image file\n\r") #signature
+		fdifile.write(b"defedd, version 0.0a          \n\r") #creator
+		for x in range(81): # comment field and eof marker
+			fdifile.write(b"\x1a") 
+		fdifile.write(b"\x02\x00") #version 2.0
+		fdifile.write(b"\x00\x9f") #last track for OE, corresponds to 160 quarter tracks, or 40 tracks
+		fdifile.write(b"\x00") #last head
+		fdifile.write(b"\x01") #5.25
+		fdifile.write(b"\xac") #300 rpm
+		if options['write_protect']:
+			fdifile.write(b"\x01") #flags, not write protected, not index synchronized
+		else:
+			fdifile.write(b"\x00") #flags, not write protected, not index synchronized
+		fdifile.write(b"\x05") #192 tpi (quarter tracks)
+		fdifile.write(b"\x05") #192 tpi (quarter tracks, though the heads aren't really this narrow)
+		fdifile.write(b"\x00\x00") #reserved
+		for track in tracks:
+			phase = (4 * track['track_number']) % 4
+			if options['process_quarters'] or phase == 0 or (options['process_halves'] and phase == 2):
+				fdifile.write(b"\xd2") # raw GCR
+				if len(track['track_bits']) == 0:
+					# treat track as unformatted (so we don't even have the 8 header bits)
+					# TODO: add partial chaating back in
+					fdifile.write(b'\x00\x00')
+					track['fdi_bits'] = 0
+				else:
+					if options['no_translation']:
+						track['fdi_bytes'] = bits_to_bytes(track['bits'])
+						track['fdi_bits'] = len(track['bits'])
+					else:
+						track['fdi_bytes'] = bits_to_bytes(track['track_bits'])
+						track['fdi_bits'] = len(track['track_bits'])
+					track['fdi_write_length'] = 8 + len(track['fdi_bytes'])
+					track['fdi_page_length'] = math.ceil(track['fdi_write_length'] / 256)
+					fdifile.write(bytes([track['fdi_page_length']]))
+			if phase == 0 and not options['process_quarters']:
+				# write zeros for lengths of quarter tracks
+				fdifile.write(b'\x00\x00\x00\x00\x00\x00')
+		# Write out enough zeros after the track data to get us to a page boundary
+		if options['process_quarters']:
+			tracks_written = len(tracks)
+		else:
+			tracks_written = 4 * len(tracks)
+		for extra_track in range(20 + 160 - tracks_written):
+			fdifile.write(b"\x00\x00")
+
+		# go to the beginning of the eddfile in case we want to write bytes straight out of it
+		eddfile.seek(0)
+
+		for track in tracks:
+			track_index = track['track_number'] * 4
+			phase = track_index % 4
+			if options['process_quarters'] or phase == 0:
+				if track['fdi_bits'] > 0:
+					fdifile.write(struct.pack('>L', track['fdi_bits']))
+					fdifile.write(struct.pack('>L', track['index_offset']))
+					if options['from_zero']:
+						# if asked, we can at this point pass bits straight from the EDD file
+						# I am allowing this on the suspicion that it might preserve a little bit
+						# more inter-track sync information for track arcing.
+						eddbuffer = eddfile.read(16384)
+						fdifile.write(eddbuffer[:len(track['track_bits'])])
+					else:
+						# bitstream data could actually come straight out of the EDD file
+						# but I will use the one that was re-encoded based on repeat location
+						fdifile.write(track['fdi_bytes'])
+					# pad to a page boundary.
+					for x in range(256 - track['fdi_write_length'] % 256):
+						fdifile.write(b"\x00")
+
+def write_mfi_file(eddfile, tracks):
+	'''Write the data out in the form of a MESS Floppy Image file'''
+	global options
+	outfile = options['output_basename'] + '.mfi'
+	message('Writing mfi image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as mfifile:
+		# Preprocess the tracks because we need this information for the header
+		# Don't have the same option of storing 2.5x revolutions of bits in MFI
+		# So, we need to use the track section we identified.
+		eddfile.seek(0)
+		current_track = 0.0
+		# This has been disabled for now, but I think it is close to working.
+		while False:
+			if eddbuffer:
+				track_index = current_track * 4
+				phase = track_index % 4
+				# TODO: allow for quarter tracks when the container supports it
+				if phase == 0:
+					track = tracks[int(track_index)]
+					# haystack_offset = track['haystack_offset']
+					# track_length = haystack_offset - track[needle_offset]
+					# if track_length > 52000:
+					# 	haystack_offset = track[needle_offset] + 52000
+					# track_bits = (track['bits'])[track['needle_offset']: track['haystack_offset']]
+					start_bit = 0
+					# TODO: Allow for positioning of the start bit with something sensible.
+					cell_length = math.floor(2000000 / len(track_bits))
+					if cell_length % 2 == 1:
+						cell_length -= 1
+					running_length = 0
+					zero_span = cell_length
+					level_a = True
+					odd_trans = False
+					mfi_track = []
+					mg_b = 1 << 28
+					for bit in track['track_bits']:
+						if bit == 1:
+							if level_a:
+								mfi_track.append(struct.pack('>L', zero_span + mg_b))
+							else:
+								mfi_track.append(struct.pack('>L', zero_span))
+							running_length += zero_span
+							zero_span = cell_length
+							odd_trans = not odd_trans
+							level_a = not level_a
+						else:
+							zero_span += cell_length
+					pad = (200000000 - running_length)
+					if odd_trans and level_a:
+						pad += mg_b
+					mfi_track.append(struct.pack('>L', pad))
+					mfi_track_z = zlib.compress(mfi_track)
+					mfitrackdata.append(mfi_track_z)
+					mfitracklength.append(len(mfi_track))
+					print('Track {} uncompressed {}, compressed {}'.format(current_track, len(mfi_track), len(mfi_track_z)))
+					tracks_to_do = 35
+					mfifile.write(b"MESSFLOPPYIMAGE\x00") #signature
+					mfifile.write(struct.pack('>L', 35)) #last track
+					mfifile.write(struct.pack('>L', 1)) #last head
+					mfifile.write(b"525 ") #form factor
+					mfifile.write(b"SSDD") #variant
+					current_offset = 16 + 16 + (16 * tracks_to_do)
+					for track_number in range(0, tracks_to_do):
+						if mfitracklength[track] > 0:
+							mfifile.write(struct.pack('>L', current_offset))
+							mfifile.write(struct.pack('>L', len(mfitrackdata[track]))) #compressed length in bytes
+							mfifile.write(struct.pack('>L', mfitracklength[track])) #uncompressed length in bytes
+							mfifile.write(struct.pack('>L', 1000)) #write splice, arbitrarily picked at 1000
+							current_offset += mfitrackdata[track].length
+						else:
+							# if the track does not exist (e.g., we need track 34.5 but have only to 34), write empty track
+							mfifile.write(struct.pack('>L', current_offset))
+							mfifile.write(struct.pack('>L', 0)) #compressed length in bytes
+							mfifile.write(struct.pack('>L', 0)) #uncompressed length in bytes
+							mfifile.write(struct.pack('>L', 0)) #write splice, arbitrarily picked at 0
+					# write the MFI track data itself
+					for track_number in range(0, tracks_to_do):
+						if mfitrackdata[track]:
+							mfifile.write(mfitrackdata[track])
+			else:
+				break
 
 if __name__ == "__main__":
 	sys.exit(main())
