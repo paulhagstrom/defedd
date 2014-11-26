@@ -454,7 +454,6 @@ def grab_first_post_sync_nibble(bits):
 # To avoid the search part and just go with the whole track, pass False as second paramter
 # TODO: The odds are good that the nibbles at the beginning will be out of sync.
 # See if I can maybe start the nibble check once they are in sync by waiting for two long nibbles first.
-# YOU ARE HERE
 def nibblize(track, do_search = True):
 	'''Run two heads over the bitstream to try to find consistent nibbles'''
 	bits = track['bits']
@@ -977,14 +976,16 @@ def clean_bits(track):
 	bits = track['bits'] # the original bits that the EDD card read
 	bit_length = len(bits)
 	# We'll try a few different needle points to try to get the best read.
-	# Since I don't believe this will matter much, only a few different needle tries.
+	# TODO: Actually, I may ditch this as I try to use the third sample.
 	needle_offset = 0
 	needle_advance = 5000
 	stop_needle = 52500
 	# my observational guesses at the minimum and maximum number of bits a track could have.
 	track_minimum = 50500
 	track_maximum = 52500
-	# don't push the haystack past the point where a whole image is no longer available
+	# we start the scan assuming we're matching bit 0 to the bit that is a minimum track distance away.
+	# We have len(bits) bits available, which corresponds to 131072 bits, approximately 2.5 track reads.
+	# So half the track actually has been sampled three times, allowing for some voting.
 	stop_haystack = len(bits) - track_maximum
 	best_progress = {'ok': False, 'progress': 0, 'needle_offset': 0, 'haystack_offset': 0, 'bits': {}}
 	while needle_offset < stop_needle:
@@ -1079,6 +1080,11 @@ def clean_bits(track):
 	track['repaired_bits'] = repaired_bits
 	return track
 
+# This will take two sets of bits (needle and haystack) and scan them to see
+# how far they match.  It tries to take into account possible simple flaws in the EDD
+# read by correcting them during the matching process.
+# It also will just give up and mark certain bits as "weak" if it can't resolve the
+# match, if the skip_weak flag is set to True (this is intended for the final full-track read)
 def match_surgery(needle, haystack, skip_weak = False):
 	'''Look for a match between needle and haystack, performing minor surgery if needed'''
 	success = False
@@ -1126,6 +1132,8 @@ def match_surgery(needle, haystack, skip_weak = False):
 				# first, if the futures are in sync already, then we have one bit that was mis-read.
 				# assume that it is a missed transition (vs. a single weak bit)
 				# and repair it to 1.
+				# This is an assumption, possibly a dangerous one.
+
 				if needle_future == haystack_future:
 					if needle[offset] == 0:
 						surgeries['needle_zeros'].append(offset)
