@@ -2612,7 +2612,7 @@ def write_v2d_file(eddfile, tracks):
 					# is it even possible to have zero nibbles, e.g., on an unformatted track?  All zeros?
 					num_tracks += 1
 				else:
-					message('No track nibbles on track {}'.format(track['track_number']), 2)					
+					message('v2d write: No track nibbles on track {}'.format(track['track_number']), 2)					
 		# write the d5ni/v2d header
 		# filesize = len(tracks) * (nibs_to_write + 4) # (1a00 + 4) * tracks
 		v2dfile.write(struct.pack('>I', filesize)) # size of whole file
@@ -2622,7 +2622,7 @@ def write_v2d_file(eddfile, tracks):
 			quarter_track = int(4 * track['track_number'])
 			phase = quarter_track % 4
 			if phase == 0 or phase == 2:
-				if len(track['track_nibbles']) > 0:
+				if 'track_nibbles' in track and len(track['track_nibbles']) > 0:
 					# assuming there are some nibbles (otherwise, skip the track)
 					# write the track header
 					v2dfile.write(struct.pack('>H', int(4 * track['track_number']))) # quarter track index
