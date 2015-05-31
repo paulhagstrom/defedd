@@ -621,19 +621,19 @@ Help and debugging:
 # initialize the lookup table in global space for later use by bytes_to_bits
 N2bits = []
 for i in range(256):
-       n = (1 << 8) | i
-       binbyte = bin(n)[3:]            # cuts off '0x1' from the beginning
-       bitlist = [int(bit) for bit in binbyte]
-       assert len(bitlist) == 8
-       N2bits.append(bitlist)
+	n = (1 << 8) | i
+	binbyte = bin(n)[3:]            # cuts off '0x1' from the beginning
+	bitlist = [int(bit) for bit in binbyte]
+	assert len(bitlist) == 8
+	N2bits.append(bitlist)
 
 # run through the buffer and use the lookup table to blast the bits onto the array
 def bytes_to_bits(eddbuffer):
 	'''Convert bytes into component bits'''
-       bits = bytearray()
-       for byte in eddbuffer:
-               bits.extend(N2bits[byte])
-       return bits
+	bits = bytearray()
+	for byte in eddbuffer:
+		bits.extend(N2bits[byte])
+	return bits
 
 def grab_nibble(bits):
 	'''Take the first nibble off the bit stream that was passed in'''
