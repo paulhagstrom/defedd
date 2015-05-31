@@ -217,6 +217,12 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 				message('Looking for intertrack sync and track groupings.', 2)
 				track_groups = sync_tracks(tracks)
 				message('Overall track advance average: {}'.format(status['sync_average']), 2)
+			else:
+				# create a trivial track group array
+				track_groups = []
+				for track in tracks:
+					track['track_group'] = len(track_groups)
+					track_groups.append({'track_group': [len(track_groups)], 'advance_average': 0})
 
 			message('Consolidating track groups if sync was sufficient.', 2)
 			tracks = group_tracks(tracks, track_groups)
@@ -254,10 +260,10 @@ def load_tracks(eddfile):
 	while True:
 		eddbuffer = eddfile.read(16384)
 		if False: # limit tracks for debugging purporses because the program is slooow
-			if current_track < 8:
+			if current_track < 12.00:
 				current_track += 0.25
 				continue
-			if current_track > 9:
+			if current_track > 13.25:
 				break
 		if eddbuffer:
 			phase = (4 * current_track) % 4
@@ -301,8 +307,8 @@ def sync_tracks(tracks):
 		# track['sync_regions'] = assemble_track_regions(track['sync_lengths'])
 		# keep an average of the best sync matches we got within this group after the first one
 		# a dramatic dip in sync match signals a new track group.  5x seems to work, it is usually
-		# an order of magnitude drop.
-		if 5 * track['sync_best'] < sync_match_average[2]:
+		# an order of magnitude drop.  Actually, Gruds in Space makes me thing 2.5x is safer.
+		if (2.5 * track['sync_best']) < sync_match_average[2]:
 			# this sync match was bad enough that it indicates we're comparing two different trakcs
 			track['sync_advance'] = False
 			# store the track group we have been accumulating, and start a new one
@@ -594,19 +600,40 @@ Help and debugging:
  	''')
 	return
 
+# made obsolete by John Aycock's update below.  This will be removed shortly.
+# def bytes_to_bits(eddbuffer):
+# 	'''Convert bytes into component bits'''
+# 	bits = bytearray()
+# 	for byte in eddbuffer:
+# 		binbyte = bin(byte)[2:] # cuts off the 0x from the beginning
+# 		padbyte = '00000000'[len(binbyte):] + binbyte
+# 		# padbyte = '{:08b}'.format(byte) # slightly slower
+# 		# binbyte = bin(byte)[2:].zfill(8) # slightly slower
+# 		# bytebits = [int(bit) for bit in binbyte]
+# 		bytebits = [int(bit) for bit in padbyte]
+# 		bits.extend(bytebits)
+# 		# bits.extend([int(bit) for bit in bin(byte)[2:].zfill(8)])
+# 	return bits
+
+# bytes_to_bits massively sped up by John Aycock, who noticed that
+# using a lookup table would be a much faster way to do this.
+
+# initialize the lookup table in global space for later use by bytes_to_bits
+N2bits = []
+for i in range(256):
+       n = (1 << 8) | i
+       binbyte = bin(n)[3:]            # cuts off '0x1' from the beginning
+       bitlist = [int(bit) for bit in binbyte]
+       assert len(bitlist) == 8
+       N2bits.append(bitlist)
+
+# run through the buffer and use the lookup table to blast the bits onto the array
 def bytes_to_bits(eddbuffer):
 	'''Convert bytes into component bits'''
-	bits = bytearray()
-	for byte in eddbuffer:
-		binbyte = bin(byte)[2:] # cuts off the 0x from the beginning
-		padbyte = '00000000'[len(binbyte):] + binbyte
-		# padbyte = '{:08b}'.format(byte) # slightly slower
-		# binbyte = bin(byte)[2:].zfill(8) # slightly slower
-		# bytebits = [int(bit) for bit in binbyte]
-		bytebits = [int(bit) for bit in padbyte]
-		bits.extend(bytebits)
-		# bits.extend([int(bit) for bit in bin(byte)[2:].zfill(8)])
-	return bits
+       bits = bytearray()
+       for byte in eddbuffer:
+               bits.extend(N2bits[byte])
+       return bits
 
 def grab_nibble(bits):
 	'''Take the first nibble off the bit stream that was passed in'''
@@ -639,8 +666,6 @@ def grab_nibble(bits):
 def find_occurrences(track, second_track = None):
 	'''Do a course-grained scan for patterns in the track'''
 	global track_maximum, track_minimum, options
-	# message('Finding occurrences.', 2)
-	processing_start_clock = time.clock()
 	if second_track:
 		# we are searching between two tracks
 		source_bits = track['bits']
@@ -711,7 +736,7 @@ def find_occurrences(track, second_track = None):
 				else:
 					# if this occurrence does NOT extend this pattern
 					# and the pattern is too short to keep, throw it back
-					if pattern[0] - pattern[2] < 500:
+					if pattern[0] - pattern[2] < 600:
 						patterns[start_bit].remove(pattern)
 				# clean up empty pattern list if we made one
 				if patterns[start_bit] == []:
@@ -728,10 +753,11 @@ def find_occurrences(track, second_track = None):
 		# message('   Current patterns at {}: {}'.format(window_end, total_patterns), 2)
 		# move on to the next window of original bits
 		start_bit = window_end
-	processing_time = time.clock() - processing_start_clock
-	# message('Patterns found: {} (overall internal total {}) {:5.2f}s'.format(len(patterns), total_total_patterns, processing_time), 2)
+	# message('Patterns found: {} (overall internal total {})'.format(len(patterns), total_total_patterns), 2)
 	return patterns
 
+# This can be SLOW.  This can be very slow.  I've seen it take almost 4 minutes on a track, even if it
+# is usually way faster.  I'm not sure what property causes the slowness but I want to eradicate whatever it is.
 def find_patterns(track, second_track = None):
 	'''Take course-grained scan and maximize matching patterns in track'''
 	occurrences = find_occurrences(track, second_track)
@@ -747,16 +773,30 @@ def find_patterns(track, second_track = None):
 	expanded_patterns = {}
 	patterns_by_length = []
 	track_length_votes = {}
-	# for ends in sorted(patterns):
-	# message('sorted pattern is {} long.'.format(len(sorted(patterns))), 2)
+	patterns_by_distance = {}
 	for source_end in sorted(occurrences):
-		# message('  patterns at {} is {} long, expanded patterns is {} long.'.format(\
-		# 	source_end, len(patterns[source_end]), len(expanded_patterns)), 2)
-		for span in occurrences[source_end]:
-			# message('Now at: {}'.format(span), 2)
+		# message('  occurrences at {} is {} long, expanded patterns is {} long.'.format(\
+		# 	source_end, len(occurrences[source_end]), len(expanded_patterns)), 2)
+		# sort by distance so at least we maximize chance of catching repeats
+		for span in sorted(occurrences[source_end], key=itemgetter(0)):
+		# for span in occurrences[source_end]:
+			# message('Now at: source end {}, span {}'.format(source_end, span), 2)
 			starts = [span[1], span[2]]
 			ends = [source_end, span[0]]
 			match_distance = ends[1] - ends[0]
+			# check to see if anything at this distance overlaps
+			already_done = False
+			if match_distance in patterns_by_distance:
+				for check_pattern in patterns_by_distance[match_distance]:
+					if check_pattern[2] <= starts[0] and check_pattern[3] >= ends[0]:
+						# we already have expanded something that covers this
+						already_done = True
+						break
+			if already_done:
+				# message('Already expanded something that covers this.', 2)
+				continue
+			# starts = [span[2], span[3]]
+			# ends = [span[0], span[1]]
 			# # see if we can avoid pushing this by looking in the patterns we already expanded
 			# this was a BAD idea, it slowed things down immensely as expanded_patterns got into the 10000s.
 			# already_done = False
@@ -774,7 +814,7 @@ def find_patterns(track, second_track = None):
 			# bit_distance = starts[1] - starts[0]
 			# try to back up the starts
 			expand = 0
-			pace = 1280
+			pace = 4096
 			# while starts[0] > expand and starts[1] > expand:
 			while True:
 				check_starts = [starts[0] - expand - pace, starts[1] - expand - pace]
@@ -807,7 +847,6 @@ def find_patterns(track, second_track = None):
 				# message('Expanded back by {}'.format(expand), 2)
 			# At this point, we can see if we just wasted our time.  Is there another pattern
 			# we already did that starts here?  If so, move on, we have this one already.
-			# this may be obsolete now, it should detect this sooner
 			if (starts[0], starts[1]) in expanded_patterns:
 				# message('Already have ({}, {}): {}'.format(starts[0], starts[1], expanded_patterns[(starts[0], starts[1])]), 2)
 				continue
@@ -852,7 +891,7 @@ def find_patterns(track, second_track = None):
 			match_length = ends[0] - starts[0]
 			match_distance = starts[1] - starts[0]
 			# ignore things that wound up being too small
-			if match_length > 300:
+			if match_length > 768:
 				patterns_by_length.append([match_length, match_distance, starts[0], ends[0], starts[1], ends[1]])
 				# collect the votes for track length
 				if match_distance in track_length_votes:
@@ -861,6 +900,12 @@ def find_patterns(track, second_track = None):
 				else:
 					# otherwise, start a new vote count for this distance
 					track_length_votes[match_distance] = match_length
+				# add to list of kept patterns by distance
+				if not match_distance in patterns_by_distance:
+					patterns_by_distance[match_distance] = [patterns_by_length[-1]]
+				else:
+					patterns_by_distance[match_distance].append(patterns_by_length[-1])
+
 	# tally up the votes to find most popular track length
 	if len(track_length_votes) > 0:
 		votes = sorted(track_length_votes.items(), key=itemgetter(1), reverse = True)
@@ -1869,6 +1914,7 @@ def locate_track_cut(track, track_shrink):
 	max_radius = track_shrink + (24 * track['tolerance'])
 	resolved_length = 0
 	found_suitable_bits = False
+	best_match = 0 # this actually was unnecessary, it will get set properly.
 	# try to pick a track cut that includes the longest match
 	longest_match, longest_match_offset, longest_match_end_offset = track['longest_resolved_match']
 	max_center = len(resolved_bits) - window_size - max_radius - 12
@@ -1891,12 +1937,17 @@ def locate_track_cut(track, track_shrink):
 		for map_segment in track_map:
 			if map_segment[0] == 'match' and map_segment[2] - map_segment[1] > window_size + 24:
 				# match is big enough to do the search
-				search_start = map_segment[1] + 12
-				search_center = search_start + track_prediction
-				if search_center + max_radius + window_size < len(resolved_bits):
-					# search center is far enough inland that we can do the radial search
-					found_suitable_bits = True
-					break
+				message('Big enough to do the search: {} to {}'.format(map_segment[1], map_segment[2]), 2)
+				if (not found_suitable_bits) or map_segment[2] - map_segment[1] > best_match:
+					# this is better than what we have so far
+					message('Better than what we had before: {}'.format(best_match), 2)
+					if map_segment[1] + 12 + track_prediction < max_center:
+						# search center is far enough inland that we can do the radial search
+						search_start = map_segment[1] + 12
+						search_center = search_start + track_prediction
+						message('Search center is {}, max center is {}, good enough.'.format(search_center, max_center), 2)
+						found_suitable_bits = True
+						best_match = map_segment[2] - map_segment[1]
 	if found_suitable_bits:
 		message('Searching from first sufficient match at {} around {}'.format(search_start, search_center), 2)
 	else:
@@ -2583,18 +2634,10 @@ def write_v2d_file(eddfile, tracks):
 	'''Write the data out in the form of a half-tracked v2d/d5ni file'''
 	global options
 	outfile = options['output_basename'] + '.v2d'
-	# This in principle can store variable numbers of nibbles per track.
-	# Right now the computation of number of nibbles is not done very well, really.
-	# requires a track analysis.  For the moment, I'll just store the first 1a00 nibbles on each track.
-	# In Virtual II, it seems only to accept half (not quarter) tracks.
-	# I think it is possible to not even have enough nibbles found for even 1a00, in which case, write fewer.
+	# A v2d/D5NI container can store quarter tracks, but Virtual II only recognizes half tracks.
 	message('Writing v2d image to {}'.format('outfile'), 2)
 	with open(outfile, mode="wb") as v2dfile:
 		# precompute the lengths so we can get the filesize
-		# nibs_to_write = 13312 # cheat massively - VII rejects this
-		# nibs_to_write = 7400 # cheat -- this is about as big as I've seen VII accept
-		# nibs_to_write = 7168 # cheat -- 1c00
-		# nibs_to_write = 6656 # 1a00 - standard for nib
 		filesize = 0
 		num_tracks = 0
 		for track in tracks:
@@ -2715,11 +2758,6 @@ def write_fdi_file(eddfile, tracks):
 						fdifile.write(b'\x00\x00')
 						lengths_written += 1
 			# Write out enough zeros after the track data to get us to a page boundary
-			# Many EDD files contain track 34 but not 34.25 etc., or track 35 but not track 35.25
-			# so quarter-tracked files won't be 140 tracks (0-34.75) but rather 137 (0-34)
-			# so, whatever, just solve for the general case and keep track.
-			# we need 43 more double-zeros after track 34.0, which would register as 137.
-			# so, 180 - tracks written.
 			for extra_track in range(180 - lengths_written):
 				fdifile.write(b"\x00\x00")
 
@@ -2736,10 +2774,6 @@ def write_fdi_file(eddfile, tracks):
 						fdifile.write(struct.pack('>L', track['index_offset']))
 						if options['from_zero'] and False:
 							# if asked, we can at this point pass bits straight from the EDD file
-							# I am allowing this on the suspicion that it might preserve a little bit
-							# more inter-track sync information for track arcing.
-							# except this won't work, we need to write bytes not bits
-							# making this not an option for now.
 							eddbuffer = eddfile.read(16384)
 							fdifile.write(eddbuffer[:len(track['track_bits'])])
 						else:
