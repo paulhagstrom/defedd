@@ -14,6 +14,7 @@ from bitstring import BitArray, BitStream
 
 # defedd - converter/analyzer for EDD files (disk images produced by I'm fEDD Up, Brutal Deluxe)
 # Paul Hagstrom, started August 2014
+# also with some optimization assistance from John Aycock
 # First attempt at using Python, so brace yourself for the occasional non-Pythonic dumbness.
 # This is still pretty rough and "in-progress"
 # TODO: Handle d13 13-sector images, and figure out what emulators support them.  (Though I think it may be none.)
@@ -36,7 +37,7 @@ options = {'write_protect': False,
 		'repair_tracks': True, 
 		'use_slice': False, 'from_zero': False, 'spiral': False,
 		'output_basename': 'outputfilename',
-		'output': {'nib': False, 'dsk': False, 'mfi': False, 'fdi': False, 'po': False, 'v2d': False, 'nit': False},
+		'output': {'nib': False, 'dsk': False, 'mfi': False, 'fdi': False, 'po': False, 'v2d': False, 'nit': False, 'nic': False},
 		'bitstring': False
 		}
 # status will be also be stored globally, things having to do with full disk
@@ -55,10 +56,10 @@ def main(argv=None):
 	print("defedd - analyze and convert EDD files.")
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hndfmp5txl1qcak0srvw2", \
+		opts, args = getopt.getopt(sys.argv[1:], "hndfmp5txl1qcak0srvw2u", \
 			["help", "nib", "dsk", "fdi", "mfi", "po", "v2d", "nit", "protect", "log",
 				"int", "quick", "cheat", "all", "keep", "zero", "slice", "spiral",
-				"verbose", "werbose", "half"])
+				"verbose", "werbose", "half", "nic"])
 	except getopt.GetoptError as err:
 		print(str(err))
 		usage()
@@ -79,6 +80,9 @@ def main(argv=None):
 		elif o == "-5" or o == "--v2d":
 			options['output']['v2d'] = write_v2d_file
 			print("Will save v2d/d5ni file.")
+		elif o == "-u" or o == "--nic":
+			options['output']['nic'] = write_nic_file
+			print("Will save UNISISK NIC file.")
 		elif o == "-n" or o == "--nib":
 			options['output']['nib'] = write_nib_file
 			print("Will save nib file.")
@@ -166,7 +170,7 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 		options['analyze_bits'] = False
 		options['analyze_nibbles'] = False
 		for output_file in options['output'].items():
-			if output_file[1] and output_file[0] != 'fdi':
+			if output_file[1] and not (output_file[0] == 'fdi' or output_file[0] == 'nic'):
 				print('No translation is only valid for fdi, but since you picked a different output format, analysis is still needed.')
 				options['analyze_bits'] = True
 				options['analyze_nibbles'] = True
@@ -618,7 +622,7 @@ Help and debugging:
 # bytes_to_bits massively sped up by John Aycock, who noticed that
 # using a lookup table would be a much faster way to do this.
 
-# initialize the lookup table in global space for later use by bytes_to_bits
+# initialize the lookup table in global space for later use by bytes_to_bits [JA]
 N2bits = []
 for i in range(256):
 	n = (1 << 8) | i
@@ -627,7 +631,7 @@ for i in range(256):
 	assert len(bitlist) == 8
 	N2bits.append(bitlist)
 
-# run through the buffer and use the lookup table to blast the bits onto the array
+# run through the buffer and use the lookup table to blast the bits onto the array [JA]
 def bytes_to_bits(eddbuffer):
 	'''Convert bytes into component bits'''
 	bits = bytearray()
@@ -2598,6 +2602,19 @@ def write_dsk_file(eddfile, tracks):
 		for track in tracks:
 			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
 				dskfile.write(track['dsk_bytes'])
+
+def write_nic_file(eddfile, tracks):
+	'''Write the EDD data out in the form of a 35-track nic file'''
+	global options
+	# restore this later when po order options are put back in
+	# outfile = options['output_basename'] + ('.po' if options['write_po'] else '.dsk')
+	outfile = options['output_basename'] + '.nic'
+	message('Writing nic image to {}'.format('outfile'), 2)
+	with open(outfile, mode="wb") as dskfile:
+		for track in tracks:
+			if (4 * track['track_number']) % 4 == 0 and track['track_number'] < 35:
+				track_nickels = bits_to_bytes(track['track_bits'][:65536])
+				dskfile.write(track_nickels)
 
 def write_nib_file(eddfile, tracks):
 	'''Write the data out in the form of a 34-track nib file'''
