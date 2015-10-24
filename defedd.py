@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 
+# defedd - converter/analyzer for EDD files created by Brutal Deluxe's
+# I'm fEDD Up.
+# Paul Hagstrom, started August 2014, finished when it's finished.
+# With some optimization asssistance from John Aycock, and lots of useful
+# testing and EDD files from Mark Pilgrim.
+
+# TODO: Consider d13 images for 13-sector images if something uses them.
+# mfi support is broken I think, newer mfi spec should handle quarter-tracks.
+
 import sys
-import zlib
 import getopt
 import struct
 import math
 import time
 from operator import itemgetter
-# added dependence on bitstring to try to speed things up
-# see https://pythonhosted.org/bitstring/
-# though so far not implemented yet
-from bitstring import BitArray, BitStream
+import zlib # needed for mfi
+# TODO: explore bitstring https://pythonhosted.org/bitstring/
+# to see if it can speed things up
+# from bitstring import BitArray, BitStream
 
-# defedd - converter/analyzer for EDD files (disk images produced by I'm fEDD Up, Brutal Deluxe)
-# Paul Hagstrom, started August 2014
-# also with some optimization assistance from John Aycock
-# First attempt at using Python, so brace yourself for the occasional non-Pythonic dumbness.
-# This is still pretty rough and "in-progress"
-# TODO: Handle d13 13-sector images, and figure out what emulators support them.  (Though I think it may be none.)
-# In its current state I haven't gotten it to write mfi successfully yet.
-# Recent update to mfi spec may be relevant, can now do quarter tracks.
+# I am leaving this in kind of a disasterous state at the moment.
+# I have folded most everything into split at zeros
+# I have tried to test it by allowing analysis of just the first two tracks
+# I have also tried to bypass all the bit analysis not in split at zeros
+# There are still some problems when a track has no discernible patterns
+# Still run into array boundedness errors.
+# Still am not analyzing bits to resolve (just keeping first instance of gap)
+# Still am not entirely convinced that it will work, but it might.
+# But right now I'm burned out and want to leave this.  Not even sure -faq works anymore.
 
 # Sneakers works with half tracks, even to v2d
 
@@ -29,185 +38,51 @@ from bitstring import BitArray, BitStream
 # Copts and Robbers: 0 addr DDAADA data MAX=25? sync; 1.5-13/15.5 by 1 sync
 # Choplifter complex: 0, 1-8, 9, A-B, C-1E.5 by .5, 20 CII+
 
-# options will be stored globally for retrievability
-options = {'write_protect': False, 
-		'process_quarters': True, 'process_halves': True, 'analyze_sectors': True, 
-		'verbose': False, 'werbose': False, 'console': [sys.stdout], 'write_log': False,
-		'write_full': False, 'no_translation': False, 'analyze_bits': True, 'analyze_nibbles': True,
-		'repair_tracks': True, 
-		'use_slice': False, 'from_zero': False, 'spiral': False,
-		'output_basename': 'outputfilename',
-		'output': {'nib': False, 'dsk': False, 'mfi': False, 'fdi': False, 'po': False, 'v2d': False, 'nit': False, 'nic': False},
-		'bitstring': False
-		}
+# tracks is an array of track structures, the track structure is:
+# track_number: track number (eg. 12.5)
+# index_offset: 0 (bit corresponding to index hole, used in creating FDI file)
+# bits: bits read from the disk
+# zero_spans: bit ranges that are at risk (000s) and not, [[0/1, start, end], ...]
+# repeating_regions: bit ranges that are valid repeats [rev1 start, end, rev2 start, end, rev3 start, end]
+# options will be stored globally for retrievability.  Set the defaults.
+options = {
+	'write_protect': False, 
+	'sync_tracks': False,
+	'process_quarters': True, 'process_halves': True, 'analyze_sectors': True, 
+	'verbose': False, 'werbose': False, 'console': [sys.stdout], 'write_log': False,
+	'write_full': False, 'no_translation': False, 'analyze_bits': True, 'analyze_nibbles': True,
+	'repair_tracks': True, 
+	'use_slice': False, 'from_zero': False, 'spiral': False,
+	'output_basename': 'outputfilename',
+	'output': {'nib': False, 'dsk': False, 'mfi': False, 'fdi': False, 'po': False, 'v2d': False, 'nit': False, 'nic': False, 'png': False},
+	'bitstring': False
+	}
 # status will be also be stored globally, things having to do with full disk
 status = {}
 
-track_maximum = 52500
-track_minimum = 48500
-required_match = 128
+track_maximum = 52500 # maximum number of bits we can expect in a track
+track_minimum = 48500 # minimum number of bits we can expect in a track
+required_match = 300 # minimum number of bits to call a match good
 threezeros = bytearray(b'\x00\x00\x00')
 syncnibble = bytearray(b'\x00\x01\x01\x01\x01\x01\x01\x01\x01')
 
-def main(argv=None):
-	'''Main entry point'''
-	global options, status
-
-	print("defedd - analyze and convert EDD files.")
-
-	try:
-		opts, args = getopt.getopt(sys.argv[1:], "hndfmp5txl1qcak0srvw2u", \
-			["help", "nib", "dsk", "fdi", "mfi", "po", "v2d", "nit", "protect", "log",
-				"int", "quick", "cheat", "all", "keep", "zero", "slice", "spiral",
-				"verbose", "werbose", "half", "nic"])
-	except getopt.GetoptError as err:
-		print(str(err))
-		usage()
-		return 1
-
-	for o, a in opts:
-		if o == "-h":
-			usage()
-			return 0
-		# output file type options
-		elif o == "-f" or o == "--fdi":
-			options['output']['fdi'] = write_fdi_file
-			# options['output']['fdi'] = eddfilename + ".fdi"
-			print("Will save fdi file.")
-		elif o == "-m" or o == "--mfi":
-			options['output']['mfi'] = write_mfi_file
-			print("Will save mfi file.")
-		elif o == "-5" or o == "--v2d":
-			options['output']['v2d'] = write_v2d_file
-			print("Will save v2d/d5ni file.")
-		elif o == "-u" or o == "--nic":
-			options['output']['nic'] = write_nic_file
-			print("Will save UNISISK NIC file.")
-		elif o == "-n" or o == "--nib":
-			options['output']['nib'] = write_nib_file
-			print("Will save nib file.")
-		# elif o == "-t" or o == "--nit":
-		# 	options['output']['nit'] = write_nit_file
-		# 	print("Will save nit (nibble timing) file.")
-		elif o == "-d" or o == "--dsk":
-			options['output']['dsk'] = write_dsk_file
-			print("Will save dsk file (DOS 3.3 order, a.k.a. .do).")
-		# elif o == "-p" or o == "--po":
-		# 	options['output']['po'] = write_po_file
-		# 	print("Will save ProDOS-ordered po (dsk-like) file.")
-		elif o == "-l" or o == "--log":
-			options['write_log'] = True
-			print("Will save log file.")
-		# other options
-		elif o == "-x" or o == "--protect":
-			options['write_protect'] = True
-			print("Will write image as write-protected if supported (FDI)")
-		elif o == "-1" or o == "--int":
-			options['process_quarters'] = False
-			options['process_halves'] = False
-			print("Will process only whole tracks.")
-		elif o == "-2" or o == "--half":
-			options['process_quarters'] = False
-			options['process_halves'] = True
-			print("Will process only half tracks.")
-		elif o == "-q" or o == "--quick":
-			options['analyze_sectors'] = False
-			print("Will skip sector search.")
-		elif o == "-c" or o == "--cheat":
-			options['write_full'] = True
-			print("Cheat and write full EDD 2.5x sample if can't find track boundary.")
-		elif o == "-k" or o == "--keep":
-			options['repair_tracks'] = False
-			print("Will not attempt to repair bitstream.")
-		# elif o == "-2" or o == "--second":
-		# 	options['use_second'] = True
-		# 	print("Will use second track copy in sample.")
-		elif o == "-a" or o == "--all":
-			options['no_translation'] = True
-			print("Will write full tracks for all tracks.")
-		elif o == "-0" or o == "--zero":
-			options['from_zero'] = True
-			print("Will write track-length bits starting from beginning of EDD sample for all tracks.")
-		elif o == "-r" or o == "--spiral":
-			options['spiral'] = True
-			print("Will try to keep tracks in sync.")
-		elif o == "-s" or o == "--slice":
-			options['use_slice'] = True
-			print("Will write track-length bits starting from beginning of EDD sample for unparseable tracks")
-		elif o == "-v" or o == "--verbose":
-			options['verbose'] = True
-			print("Will be more chatty about progress than usual.")
-		elif o == "-w" or o == "--werbose":
-			options['verbose'] = True
-			options['werbose'] = True
-			print('''
-It was a dark and stormy night.  On the screen, a cursor in a terminal window
-glowed invitingly, like a candle behind a frosty ground-floor window of a
-run-down Victorian inn.  The inn had seen better days.  Travelers were few and
-far between now that the railway station had closed, prospective lodgers being
-whisked onward to the rambunctious squalor of the larger nearby cities.  The
-wind whistled angrily, pushing a draft through the deteriorating walls and
-causing the candle to flicker, much like a cursor in a dark terminal window.
-Our story begins with a single command, cautiously typed at a prompt. . .
-''')
-
-	try:
-		eddfilename = args[0]
-	except:
-		print('You need to provide the name of an EDD file to begin.')
-		return 1
-
-	options['output_basename'] = eddfilename
-
-	# Do some sanity checking
-	# To write dsk files we need to do the sector analysis, for others it is not needed
-	if options['output']['dsk'] and not options['analyze_sectors']:
-		print('It is necessary to analyze sectors in order to write a .dsk file, turning that option on.')
-		options['analyze_sectors'] = True
-	# To write pure EDD->fdi files (which OpenEmulator can handle), we don't need to do any analysis.
-	# If user picked no translation but picked something other than fdi, turn no translation off
-	if options['no_translation']:
-		options['analyze_bits'] = False
-		options['analyze_nibbles'] = False
-		for output_file in options['output'].items():
-			if output_file[1] and not (output_file[0] == 'fdi' or output_file[0] == 'nic'):
-				print('No translation is only valid for fdi, but since you picked a different output format, analysis is still needed.')
-				options['analyze_bits'] = True
-				options['analyze_nibbles'] = True
-				break
-
-	if options['spiral'] and not (options['process_halves'] or options['process_quarters']):
-		print('Cannot do track sync without at least processing half tracks, quarter tracks is better.')
-		print('Processing half tracks for now.')
-		options['process_halves'] = True
-
-	# TODO: Improve the style of the quarter/half/whole track decisionmaking here
-	if options['process_quarters'] and not options['output']['mfi'] and not options['output']['fdi']:
-		options['process_quarters'] = False
-		if options['process_halves'] and not options['output']['v2d']:
-			print('Only processing whole tracks, no sense in processing quarter tracks unless they will be stored.')
-			options['process_halves'] = False
-		else:
-			print('Only processing half tracks, no sense in processing quarter tracks unless they will be stored.')
-	# I think I am going to remove the po option for now until I settle the analysis portion
-	# if options['output']['dsk'] and options['output']['po']:
-	# 	options['output']['po'] = False
-	# 	print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
-	# TODO: Maybe there is other sanity checking to do here, add if it occurs to me
-
+# Main analysis control loop
+def analyze_disk():
+	'''Main analysis control loop'''
+	global options
 	# Main analysis loop.  This goes through the whole EDD file track by track and analyzes each track.
 	# The resulting analyzed data is all accumulated in memory, then written back out in as many formats as requested.
 	
-	with open(eddfilename, mode="rb") as eddfile:
+	with open(options['output_basename'], mode="rb") as eddfile:
 		if options['write_log']:
 			options['console'].append(open(options['logfilename'], mode="w"))
 
-		# if we are trying to keep tracks in sync, do a final pass over the tracks to implement that
-		# better done here at the end rather than incrementally so that we have an average with a lot
-		# of data points.
-		message('Reading tracks from EDD file, converting into bit stream.', 2)
 		tracks = load_tracks(eddfile)
-		message('Load/convert took {:5.2f} seconds'.format(status['load_time']), 2)
+		# cut back to just first two tracks for testing
+		# tracks = tracks[0:2]
+
+		# message('Searching within tracks for patterns.', 2)
+		# tracks = track_patterns(tracks)
 
 		# TODO: make this more elegant and/or more correct, also allow for some combinations like sync
 		if options['no_translation']:
@@ -216,30 +91,32 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 				track['track_repeat'] = len(track['bits'])
 				track['track_bits'] = track['bits'][track['track_start']: track['track_repeat']]
 		else:
-			# no point in looking for intertrack sync if we are not processing tracks that are close enough together
-			if options['process_halves'] or options['process_quarters']:
-				message('Looking for intertrack sync and track groupings.', 2)
+			if options['sync_tracks']:
 				track_groups = sync_tracks(tracks)
-				message('Overall track advance average: {}'.format(status['sync_average']), 2)
+				tracks = group_tracks(tracks, track_groups)
 			else:
 				# create a trivial track group array
 				track_groups = []
 				for track in tracks:
 					track['track_group'] = len(track_groups)
 					track_groups.append({'track_group': [len(track_groups)], 'advance_average': 0})
+			# tracks = track_patterns(tracks)
+			for track in tracks:
+				track = split_at_zeros(track)
+				track['track_bits'] = track['bit_stream']
+				track['track_start'] = 0
+				track['track_repeat'] = len(track['track_bits'])
 
-			message('Consolidating track groups if sync was sufficient.', 2)
-			tracks = group_tracks(tracks, track_groups)
-
-			message('Searching within tracks for patterns.', 2)
-			tracks = track_patterns(tracks)
+			# here for testing
+			options['analyze_bits'] = False
 
 			if options['analyze_bits'] or options['analyze_nibbles'] or options['analyze_sectors']:
 				message('Going through track groups, resolving bits and analyzing nibbles.', 2)
 				tracks = analyze_track(tracks, track_groups)
 
-			message('Going through track groups and trimming tracks for sync.', 2)
-			tracks = sync_groups(tracks, track_groups)
+			if options['sync_tracks']:
+				message('Going through track groups and trimming tracks for sync.', 2)
+				tracks = sync_groups(tracks, track_groups)
 
 		message('Writing output files.', 2)
 		for output_type, output_file in options['output'].items():
@@ -251,40 +128,696 @@ Our story begins with a single command, cautiously typed at a prompt. . .
 			(options['console'])[1].close
 	return 1
 
-# Take the open file handle and read the (relevant) bits from the EDD into tracks array
-# Return the tracks array.  This should be the first thing called inside the open file loop.
-# File does not really need to stay open after this, but it does anyway.
-# This takes a surprisingly long time.
+# Take the open file handle and read the bits from the EDD into tracks array
+# Return the initialized tracks array.
+# This should be the first thing called inside the open file loop.
 def load_tracks(eddfile):
 	'''create the base tracks array from the edd file'''
 	global options, status
+	message('load_tracks: Reading tracks from EDD file, converting into bit stream.', 2)
+	time_load_tracks = time.clock()
 	current_track = 0.0
 	tracks = []
-	load_start_clock = time.clock()
 	while True:
 		eddbuffer = eddfile.read(16384)
-		if False: # limit tracks for debugging purporses because the program is slooow
-			if current_track < 12.00:
-				current_track += 0.25
-				continue
-			if current_track > 13.25:
-				break
-		if eddbuffer:
-			phase = (4 * current_track) % 4
-			if phase == 0 or options['process_quarters'] or (phase == 2 and options['process_halves']):
-				track = {'track_number': current_track}
-				track['index_offset'] = 0 # bit position of the index pulse, FDI wants this
-				# convert EDD bytes into an actual bit stream
-				if options['bitstring']:
-					track['bits'] = BitArray(bytes=eddbuffer)
-				else:
-					track['bits'] = bytes_to_bits(eddbuffer)
-				tracks.append(track)
-		else:
-			break
+		if not eddbuffer:
+			break;
+		tracks.append({
+			'track_number': current_track,
+			'index_offset': 0,
+			'bits': bytes_to_bits(eddbuffer)
+		})
 		current_track += 0.25
-	status['load_time'] = time.clock() - load_start_clock
+		# display_bits call below is useful for seeing all the bits on the track, was
+		# used when I was trying to see just how noisy extended zero regions that
+		# I wrote myself really are.
+		# display_bits('Track {:5.2f}:'.format(tracks[-1]['track_number']), tracks[-1]['bits'], 2)
+	status['time_load_tracks'] = time.clock() - time_load_tracks
+	message('load_tracks: Load/convert took {:5.2f} seconds'.format(status['time_load_tracks']), 2)
 	return tracks
+
+def track_patterns(tracks):
+	'''Compute the intratrack matches for each track'''
+	global options
+	message('Searching within tracks for patterns.', 2)
+	for track in tracks:
+		time_track = time.clock()
+		track = split_at_zeros(track)
+		# if we consolidated this track into the group then we will have already found these patterns
+		if not 'pattern_lengths' in track:
+			track['pattern_lengths'], track['track_length'] = find_patterns(track)
+		if len(track['pattern_lengths']) > 0:
+			track['match_best'] = track['pattern_lengths'][0][0]
+			track['track_regions'] = assemble_track_regions(track['pattern_lengths'])
+		else:
+			track['match_best'] = 0
+			track['track_regions'] = []
+		track['time_track'] = time.clock() - time_track
+
+		# status output
+		status_length = '{:5d}'.format(track['track_length']) if 'track_length' in track else '  n/a'
+		status_match = '{:6d}'.format(track['match_best']) if track['match_best'] > 0 else '   n/a'
+		# message('Track {:5.2f}: bits: {}, matched: {}, group: {:2d}, time: {:5.2f}s'.format(\
+		# 	track['track_number'], status_length, status_match, track['track_group'], track['time_track']), 1)
+		message('Track {:5.2f}: bits: {}, matched: {}, time: {:5.2f}s'.format(\
+			track['track_number'], status_length, status_match, track['time_track']), 1)
+
+	return tracks
+
+# In a track, look for streams of bits that appear to contain more zeros
+# in a row than the amplifier can reliably handle.  Break up the regions
+# between those as being more reliable regions for matching.
+# The name of this no longer really reflects its role, since everything was split out.
+def split_at_zeros(track):
+	'''Locate streams of bits that look to contain more zeros in a row than the amplifier can handle'''
+	global options, threezeros, track_maximum, track_minimum
+	# split the track up by zero regions
+	message('Track: {}'.format(track['track_number']), 2)
+	track = find_zeros(track)
+	track = find_patterns_between_zeros(track)
+	track = build_track_map(track)
+	track = compress_gaps(track)
+	track = resolve_gaps(track)
+	track = build_bit_stream(track)
+	# Now we've basically got a solid track.
+	# Obsolete: remove.
+	# first_good = data_regions[0]
+	# bits_to_find = bit_stream[:(first_good[2] - first_good[1])]
+	# repeat_index = bit_stream.index(bits_to_find, track_minimum)
+	# reliable_track = bit_stream[:repeat_index]
+	# message('Reliable track is {} bits long'.format(repeat_index), 2)
+	# track['reliable_track'] = bit_stream[:repeat_index]
+	# for now, for testing, just force the track to be beautiful
+	# track['bits'] = bit_stream[:repeat_index]
+	# track['bits'].extend(bit_stream[:repeat_index])
+	# track['bits'].extend(bit_stream[:repeat_index])
+	# track['zero_map'] = track_map
+	return track
+
+# Find regions in the track that seem to be stretches of 0s, these are at great risk of
+# being misread, since the amplifier randomly produces spurious 1s if it reads too many 0s in a row.
+# Areas between these "zero streams" are the more reliable things to search for.
+# Strategy is to find three 000s in a row, basically marks the start of a risk zone
+# Risk zone starts with 000, ends when the next 1 is not followed by 000 within 25 bits.
+# The 25 is an arbitrary guess.  0001...(no nearby 000s)... does not count as a zero stream.
+# returns an arrays of regions in track['zero_spans'], with [0/1, start bit, end bit]
+# 0 is a zero span, 1 is a reliable span (with margins removed)
+# to be conservative the "reliable" regions are shrunk by a margin on each side,
+# so there is a margin between each zero region and adjacent reliable region
+# I suppose that could be considered a reliablesque region.  If you like.
+def find_zeros(track):
+	# threezeros was defined globally to save a tiny number of cycles
+	global options, threezeros, track_minimum
+	if 'zero_spans' in track:
+		# we already did this, skip ahead
+		return track
+	bits = track['bits']
+	zero_spans = []
+	zero_stream_start = 0
+	margin = 10 # 10 bits around a zero stream we found still count as being in a zero stream
+	escape_margin = 25 # 0001 that has no 000 within 25 bits marks end of zero stream
+	bit_stop = len(bits) - 3 # last place we could find a 000
+	in_zero_stream = False
+	index  = 0
+	while index < bit_stop:
+		# find the next 000
+		if not in_zero_stream:
+			# if we're out of a zero stream go find the next one
+			try:
+				next_000 = bits.index(threezeros, index)
+				# area between index and the next_000 (modulo margin) is a reliable, non-zero stream
+				zero_spans.append([1, index + margin, next_000 - margin])
+				# move the index up to the zero stream and start collecting it
+				index = next_000
+				zero_stream_start = index
+				in_zero_stream = True
+			except ValueError:
+				# no more 000s, we're done checking
+				# area between index and len(bits) modulo margin is reliable
+				zero_spans.append([1, index + margin, len(bits) - margin])
+				break
+		else:
+			# we are in a zero stream, skip ahead to the next 1
+			try:
+				index = bits.index(0x01, index)
+			except ValueError:
+				# There are no more 1s left, so track ends in a zero stream, and we're out
+				zero_spans.append([0, zero_stream_start, len(bits)])
+				break
+			# from the 1 that we found, look to see if another 000 occurs in the near future
+			try:
+				next_000 = bits.index(threezeros, index, index + escape_margin)
+				# there are more 000s coming up, so we are still in a zero stream
+				# move the index up to them, probably saves a picosecond.
+				index = next_000
+			except ValueError:
+				# There are no 000s in the short term, so we're done with the zero stream
+				zero_spans.append([0, zero_stream_start, index])
+				in_zero_stream = False
+	# We now have a track map, unless we didn't find any 000s in the whole track.  Could happen.
+	# In that case, the whole track is essentially "reliable".
+	# NOTE: Diversi-DOS.EDD has this property, no zero streams at all.
+	# message('Zero spans: {}'.format(zero_spans), 2)
+	# TODO: Following code isn't working right.  We got one very long data span first, this adds a second.
+	if len(zero_spans) == 1:
+		message('No zero streams found in track.', 2)
+		# set the "reliable" data region to be the first track_minimum bits.
+		# zero_spans.append([1, 0, track_minimum])
+		zero_spans = [[1, 0, track_minimum]]
+	track['zero_spans'] = zero_spans
+	return track
+
+# Search the track for repeats, avoiding patches of 000s, this can usually get the repeats pretty quickly.
+# Even standard DOS disks can have trouble with strict matching otherwise because there are often patches of 000s
+# between sectors.
+# This maybe could be smarter.  We have zero/reliable regions throughout all 2.5 revolutions.
+# But it only looks at the reliable regions in the first revolution and tries to find
+# matches, disregarding the zero/reliable divisions that were found in the last 1.5 revolutions.
+# returns track['repeating_regions'] as [rev1 start, end, rev2 start, end, rev3 start, end]
+def find_patterns_between_zeros(track):
+	global track_minimum, track_maximum, required_match
+	# TODO: The following call is probably unnecessary unless we could get here
+	# without having already found the zeros.  The call will short-circuit if
+	# the zeros were already located.
+	track = find_zeros(track)
+	# Go through the reliable regions that start within revolution 1 and find all repeats
+	# The findings will be recorded by extending the elements in the zero_spans array
+	# to also contain [..., rev2 start, end, rev3 start, end], where 0, 0 means not found
+	bits = track['bits']
+	data_regions = []
+	stop_bit = None
+	for region in track['zero_spans']:
+		if (stop_bit and region[1] > stop_bit) or region[1] > track_maximum:
+			# we've moved past the first revolution, so we're finished
+			break
+		bit_length = region[2] - region[1]
+		if region[0] == 1 and bit_length > required_match: # not a zero stream and long enough
+			bits_to_find = bits[region[1]: region[2]] # the reliable region
+			index = region[1] + track_minimum # start searching 1 track ahead
+			try:
+				occurrence = bits.index(bits_to_find, index)
+				if occurrence > region[1] + track_maximum:
+					# this was found, but beyond the second revolution
+					if occurrence < region[1] + track_minimum + track_minimum:
+						# we found third revolution but not second revolution
+						region.extend([0, 0, occurrence, occurrence + bit_length])
+					else:
+						# we found something weird, a copy but too far away for second revolution
+						# and too close for third.  So, just record it as not found and move on.
+						# Shouldn't happen often, if at all.
+						region.extend([0, 0, 0, 0])
+				else:
+					# we found the bits in the second revolution.
+					region.extend([occurrence, occurrence + bit_length])
+					# can we find third revolution?
+					try:
+						occurrence = bits.index(bits_to_find, index + track_minimum)
+						# yes, we found the third revolution, record it
+						region.extend([occurrence, occurrence + bit_length])
+					except ValueError:
+						# could not find the bits.
+						# second repeat is probably off the end of the stream
+						region.extend([0, 0])
+			except ValueError:
+				# did not find the bits anywhere up ahead in any revolution.
+				region.extend([0, 0, 0, 0])
+			# if we found at least one repeat, trust this as good data
+			if region[3] > 0 or region[5] > 0:
+				data_regions.append(region[1:])
+			# if this is the first good region, move the stop point back to the repeat
+			if not stop_bit:
+				stop_bit = region[3]
+			rev2_distance = region[3] - region[1] if region[3] > 0 else 0
+			rev3_distance = region[5] - region[3] if region[5] > 0 else 0
+			message('data: {:6d}-{:6d} ({:5d}) {:6d} ({:5d}), {:6d} ({:5d})'.format(region[1], region[2], bit_length,
+				region[3], rev2_distance, region[5], rev3_distance), 2)
+		else:
+			# a zero stream, print a debugging message for now
+			message('ZERO: {:6d}-{:6d} ({:5d})'.format(region[1], region[2], bit_length), 2)	
+			pass
+	track['repeating_regions'] = data_regions
+	return(track)
+
+# once we've split at zeros and found repeating regions, assemble them into a map so we have
+# boundary conditions for the parts of the track we need to resolve.  The format of the track map is:
+# [1/0, rev 1 start, end, rev 2 start, end, rev 3 start, end]
+# First element will be a 1 if we have at least rev 1 and rev 2 consistent.
+def build_track_map(track):
+	global track_maximum, track_minimum, required_match
+	edd_string = '       ]        ]        ]        ]        ]        ]        ]        ]       ]       ]'
+	track_map = []
+	first_good = None
+	bit_cursor = [0, 0, 0] # current point for the three revolutions
+	bits = track['bits']
+	# now, go through the data regions we marked as good and mark the stuff in between as in need of resolution
+	for region in track['repeating_regions']:
+		bit_length = region[1] - region[0]
+		# for the moment ignore "good regions" that don't have a second revolution match
+		# (those are regions where revolution 1 matched revolution 3 but not revolution 2)
+		# also need to at least make the minimum good region length
+		if region[1] > 0 and bit_length > required_match:
+			if bit_cursor[0] > 0:
+				# the bit cursor has moved already, so we've had a prior good region.
+				# add the gap between prior region and this one in both rev 1 and rev 2
+				to_resolve = [bits[bit_cursor[0]: region[0]], bits[bit_cursor[1]: region[2]]]
+				# Add revolution 3 bits if we can.  Note that it is possible to have two good
+				# regions with rev 3 bits separated by one that does not have them.  In that
+				# case for now we don't want to try to resolve the rev 3 bits.
+				# In intermediate good region without rev 3 bits, third cursor goes back to 0.
+				# So: if we have rev 3 bits and we had rev 3 bits before, add the rev 3 gap in.
+				if len(to_resolve[1]) == 0:
+					message('Added a zero to_resolve from {} to {}'.format(bit_cursor[1], region[2]), 2)
+				if region[4] > 0 and bit_cursor[2] > 0 and bit_cursor[2] < region[4]:
+					to_resolve.append(bits[bit_cursor[2]: region[4]])
+					if len(to_resolve[2]) == 0:
+						message('Added a zero to_resolve check bits from {} to {}'.format(bit_cursor[2], region[4]), 2)
+				# Add this as a gap to the bit map, between bit cursor 0 and the start of the good region
+				# with the gap bits to resolve in the to_resolve array.
+				track_map.append([0, bit_cursor[0], region[0], to_resolve])
+				message('Added    gap: {} - {} ({})'.format(bit_cursor[0], region[0], region[0] - bit_cursor[0]), 2)
+				# show where the EDD card's bytes ended, in case this helps figure out failure modes
+				# I don't actually think this is helping, though, after having looked at it.
+				if False: # commenting out the display for the moment.
+					message(edd_string[(7 - bit_cursor[0] % 8):], 2)
+					message(edd_string[(7 - bit_cursor[1] % 8):], 2)
+					message(edd_string[(7 - bit_cursor[2] % 8):], 2)
+					for gap_segment in to_resolve:
+						display_bits('', gap_segment, 2)
+			# then add the trusty bits
+			# if this is the first one, remember it, we can use this to know when we are done.
+			if not first_good:
+				first_good = region
+			# recall that for the moment I am only considering a region "good" if it has rev 1 and rev 2
+			track_map.append([1, region[0], region[1], [bits[region[0]: region[1]]]])
+			message('Added trusty: {} - {} ({})'.format(region[0], region[1], bit_length), 2)
+			# and set the cursor to the end of the trusty bits
+			# if there are rev 3 bits ("check bits") set the third cursor to their end
+			# if there are not, zero the third cursor out so it does not get used for next gap
+			check_bits = region[4] + bit_length if region[4] > 0 else 0
+			bit_cursor = [region[1], region[2] + bit_length, check_bits]
+			message('Bit cursor: {}'.format(bit_cursor))
+	# now we have all the bits in track_map except the gap bits leading up to the first good bits
+	# and those following the last good bits.  This may or may not be long enough to cover the track.
+	# One situation is where we started with a good region that is contained in the last good region
+	# (the True good region crosses the track boundary, so we got the tail end at the beginning).
+	# In that case, we basically want to lop off the beginning and keep the last good bits.
+	# Otherwise, the track ends in a gap that needs resolution.  This is slightly trickier.
+	# The leading gap bits are the tail end of the gap bits that cross the rev 1/2 boundary.
+	# Since we still need to resolve them, we don't know exactly how they line up.
+	# If the first good region has rev 3 bits, then we're ok, we at least have two versions
+	# of this gap we can resolve, and we can ignore the leading gap.
+	# A subcase of that would be one where the first good region is too long to have rev 3
+	# bits, but if we lop the tail off it would have.  I should check for that, since that
+	# also gives us two copies to resolve while still allowing us to ignore the leading gap.
+	# If the first good region simply does not have rev 3 bits -- meaning I guess that there
+	# was a read error in rev 3 -- then we would either have to guess on the second copy of
+	# the gap bits, or just commit to the only version of the gap bits we have.
+	# I think guessing is probably marginally better, so we would have a leading and a
+	# trailing gap, where the leading gap resolves against the bits from the first good
+	# rev 2 start back as many bits as the leading gap has (since I have no better guess),
+	# and the trailing gap -- from the rev 1 bit cursor to the beginning of the guessed second
+	# copy of the leading gap -- resolves against the bits from the rev 2 end of the last
+	# good data region forward as many bits as the rev 1 trailing gap had.  In that
+	# situation, there would be no length pressure during resolution because the gap
+	# bits are guaranteed to be the same length, but maybe there will still be some
+	# useful resolution possible.  And of course one hopes it barely matters because
+	# this is after all in the middle of an unreliable gap.
+	# Now, after all that verbiage, let us implement it.
+	message('Bit cursor: {}'.format(bit_cursor), 2)
+	message('First good: {}'.format(first_good), 2)
+	if bit_cursor[0] > first_good[2]:
+		# end of last good region was past the beginning of the rev 2 copy of the first one
+		# I believe there is no way they can not match, so go ahead and end on a good
+		# region, chop off the last good region to correspond to the rev 2 copy
+		# it is possible that the last good region was perfectly aligned, though, in which case
+		# we eliminate the entire last map chunk.
+		if track_map[-1][1] == first_good[2]:
+			message('Track ended exactly short of good repeat, lopping off last good block', 2)
+			del track_map[-1]
+		else:
+			message('Track covered, begins and ends on good data, chopping latter block down.', 2)
+			# message('Track map -1 was {}'.format(track_map[-1]), 2)
+			track_map[-1][2] = first_good[2] - 1 # end of track
+			# cut back the bits as well
+			track_map[-1][3] = track_map[-1][3][: track_map[-1][2] - track_map[-1][1]]
+			# now track_map starts and ends with a good region, and they should flow together
+			# message('Track map -1 winds up being {}'.format(track_map[-1]), 2)
+	else:
+		# end of last good region still short of the full track, so we end on a gap
+		if first_good[4] > 0:
+			# we have rev 3 bits for the first good region, so we can find two copies of
+			# the gap bits the track ends on
+			to_resolve = [bits[bit_cursor[0]: first_good[2]], bits[bit_cursor[1]: first_good[4]]]
+			track_length = first_good[2] - first_good[0]
+			track_map.append([0, bit_cursor[0], track_length, to_resolve])
+			message('Track ends on gap, found reliable second copy.', 2)
+		else:
+			# we don't have rev 3 bits for the first good region.
+			# Check to see if we would have if the first good region had not been
+			# so freaking long.
+			bits_to_find = bits[first_good[0]: first_good[0] + required_match]
+			try:
+				occurrence = bits.index(bits_to_find, first_good[2] + track_minimum)
+				# yes, we found the beginning of the third revolution, so we can use that
+				# to demarcate the end of the second copy of the gap
+				to_resolve = [bits[bit_cursor[0]: first_good[2]], bits[bit_cursor[1]: occurrence]]
+				track_length = first_good[2] - first_good[0]
+				track_map.append([0, bit_cursor[0], track_length, to_resolve])
+				message('Track ends on gap, found reliable second copy through some effort.', 2)
+			except ValueError:
+				# even this limited search couldn't find the end of the gap, we have to guess
+				# insert leading gap into map and add trailing gap to map
+				track_length = first_good[2] - first_good[0]
+				# leading gap
+				to_resolve = [bits[:first_good[0]], bits[track_length: first_good[2]]]
+				track_map.insert(0, [0, 0, first_good[0], to_resolve])
+				# trailing gap
+				gap_length = track_length - bit_cursor[0]
+				to_resolve = [
+					bits[bit_cursor[0]: track_length],
+					bits[bit_cursor[1], bit_cursor[1] + gap_length]
+					]
+				track_map.append([0, bit_cursor[0], track_length, to_resolve])
+				message('Track gap guessed, begins and ends on gap.', 2)
+	# save our work for posterity
+	track['track_map'] = track_map
+	return track
+
+# Compress gaps (try to extend good regions around the gaps into the gaps), to
+# minimize the bits we actually need to resolve
+def compress_gaps(track):
+	track_map = track['track_map']
+	map_size = len(track_map)
+	message('Track map size is {}, heading to forward scan:'.format(len(track_map)), 2)
+	for segment in range(map_size - 1):
+		# moving forward, look for sequence of good-gap
+		if track_map[segment][0] == 1 and track_map[segment + 1][0] == 0:
+			message('Checking {} and following'.format(segment), 2)
+			# good block followed by a gap, try to push the good block in
+			good_block = track_map[segment]
+			gap_block = track_map[segment + 1]
+			edge_bits = bytearray()
+			to_resolve = gap_block[3]
+			check_bits = True if len(to_resolve) == 3 else False
+			# message('Length of to_resolve is {}'.format(len(to_resolve)), 2)
+			# message('to_resolve is actually: {}'.format(to_resolve), 2)
+			# do the first bits in all variants match?
+			while True:
+				test_bit = to_resolve[0][0]
+				if to_resolve[1][0] == test_bit:
+					# first one does
+					# if check_bits:
+					# 	message('Length of to_resolve[2] is {}'.format(len(to_resolve[2])), 2)
+					if check_bits and to_resolve[2][0] != test_bit:
+						# second one does not, so we are done
+						break
+				else:
+					# first one does not, so we are done
+					break
+				# if we got to here, we can shrink the gap and keep going
+				edge_bits.append(test_bit)
+				# chop to_resolve down
+				del to_resolve[0][0]
+				del to_resolve[1][0]
+				if check_bits:
+					del to_resolve[2][0]
+				# we have to stop if we eliminated one of the gap options
+				if len(to_resolve[0]) == 0 or len(to_resolve[1]) == 0 or (check_bits and len(to_resolve[2])== 0):
+					# we have eliminated the gap in at least one of the bit strings, stop here.
+					# eliminating the bits in any of the gaps will eliminate the gap.
+					to_resolve = []
+					message('One of the gaps pushed up to nothing.', 2)
+					break
+			# add the bits we found to the end of the good block
+			good_block[2] += len(edge_bits)
+			good_block[3][0].extend(edge_bits)
+			message('good_block[:3]: {}'.format(good_block[:3]), 2)
+			# Update the left edge of the gap
+			gap_block[1] += len(edge_bits)
+			gap_block[3] = to_resolve
+			message('gap_block[:3]: {}'.format(gap_block[:3]), 2)
+			message('Pushed left edge of gap by {} to {} aka {}'.format(len(edge_bits), good_block[2], gap_block[1]))
+	# We've now pushed the right edge of the good blocks as far forward as we
+	# can.  This could maybe have reduced the gap to nothing if there was just
+	# a single spurious bit somewhere.  Go through and clean up gaps that have
+	# no bits as one of their options.
+	for segment in range(len(track_map), 0, -1):
+		check_segment = track_map[segment - 1]
+		if check_segment[0] == 0 and check_segment[3] == []:
+			# this gap got reduced away and was flagged as such, pull it out
+			del track_map[segment - 1]
+	# now, move backwards to try to squeeze the gaps from the other end
+	map_size = len(track_map)
+	message('Track map size is {}, heading to reverse scan:'.format(len(track_map)), 2)
+	for segment in range(map_size - 1):
+		tnemges = map_size - 1 - segment
+		# moving backward, look for sequence of good-gap from the end
+		if track_map[tnemges][0] == 1 and track_map[tnemges - 1][0] == 0:
+			# good block preceded by a gap, try to push the good block in
+			message('Checking {} and preceding'.format(tnemges), 2)
+			good_block = track_map[tnemges]
+			gap_block = track_map[tnemges - 1]
+			message('good_block[:3]: {}'.format(good_block[:3]), 2)
+			message('gap_block[:3]: {}'.format(gap_block[:3]), 2)
+			edge_bits = bytearray()
+			to_resolve = gap_block[3]
+			check_bits = True if len(to_resolve) == 3 else False
+			# do the last bits in all variants match?
+			while True:
+				# message('to_resolve: {}'.format(to_resolve), 2)
+				# message('edge_bits: {}'.format(edge_bits), 2)
+				test_bit = to_resolve[0][-1]
+				if to_resolve[1][-1] == test_bit:
+					# first one does
+					if check_bits and to_resolve[2][-1] != test_bit:
+						# second one does not, so we are done
+						break
+				else:
+					# first one does not, so we are done
+					break
+				# if we got to here, we can shrink the gap and keep going
+				edge_bits.append(test_bit)
+				# chop to_resolve down
+				del to_resolve[0][-1]
+				del to_resolve[1][-1]
+				if check_bits:
+					del to_resolve[2][-1]
+				# we have to stop if we eliminated one of the gap options
+				if len(to_resolve[0]) == 0 or len(to_resolve[1]) == 0 or (check_bits and len(to_resolve[2])== 0):
+					# we have eliminated the gap in at least one of the bit strings, stop here.
+					# eliminating the bits in any of the gaps will eliminate the gap.
+					to_resolve = []
+					message('One of the gaps pulled back to nothing.', 2)
+					break
+			# add the bits we found to the beginning of the good block
+			good_block[1] -= len(edge_bits)
+			# reverse the edge bits
+			edge_bits.reverse()
+			edge_length = len(edge_bits)
+			edge_bits.extend(good_block[3][0])
+			good_block[3][0] = edge_bits
+			# message('good_block[:3]: {}'.format(good_block[:3]), 2)
+			# Update the right edge of the gap
+			gap_block[2] -= edge_length
+			gap_block[3] = to_resolve
+			message('gap_block[:3]: {}'.format(gap_block[:3]), 2)
+			message('Pulled right edge of gap by {} to {} aka {}'.format(edge_length, good_block[1], gap_block[2]))
+	# We've now pushed the left edge of the good blocks as far backward as we
+	# can.  This could maybe have reduced the gap to nothing though it is 
+	# fairly unlikely that it wasn't already reduced in the forward pass.
+	# Not impossible, though, I think. So, go through and clean up gaps that have
+	# no bits as one of their options.
+	message('Track map has {} entries'.format(len(track_map)), 2)
+	for segment in range(len(track_map), 0, -1):
+		check_segment = track_map[segment - 1]
+		if check_segment[0] == 0 and check_segment[3] == []:
+			# this gap got reduced away and was flagged as such, pull it out
+			del track_map[segment - 1]
+	# And now track map should be as compressed as it can be.
+	# It was updated in place, so just return track.
+	return track
+
+# This is an IOU.  Right now gaps are resolved by accepting the first option.
+def resolve_gaps(track):
+	message('resolve_gaps.', 2)
+	for segment in track['track_map']:
+		if segment[0] == 0:
+			# gap
+			segment[3] = [segment[3][0]]
+	return(track)
+
+# Go through the track map after compression and resolution and build a bit stream
+def build_bit_stream(track):
+	message('build_bit_stream.', 2)
+	bit_stream = bytearray()
+	for segment in track['track_map']:
+		message('Segment[:3]: {}'.format(segment[:3]), 2)
+		bit_stream.extend(segment[3][0])
+	track['bit_stream'] = bit_stream
+	return(track)
+
+# Short version that just takes the rough cut and keeps it.
+def find_patterns(track, second_track = None):
+	# First, get a course match, only valid up to the window size used in find_occurrences.
+	occurrences = find_occurrences(track, second_track)
+	# Flatten the patterns and collect track length votes
+	track_length_votes = {}
+	patterns_by_length = []
+	for source_end in occurrences:
+		for span in occurrences[source_end]:
+			# collect the votes for track length
+			if span[1] in track_length_votes:
+				# weight the votes for this length by the length of the match
+				track_length_votes[span[1]] += span[0]
+			else:
+				# otherwise, start a new vote count for this distance
+				track_length_votes[span[1]] = span[0]
+			patterns_by_length.append(span)
+	# Sort the patterns by longest match
+	patterns_by_length.sort(key = itemgetter(0), reverse = True)
+	# democracy in action, track length will be the one with the most bits found matched at that length
+	if len(track_length_votes) > 0:
+		votes = sorted(track_length_votes.items(), key=itemgetter(1), reverse = True)
+		track_length, highest_vote_count = votes[0]
+	else:
+		track_length = 0
+		highest_vote_count = 0
+	# track_length = 0 if patterns_by_length == [] else patterns_by_length[0][1]
+	# if it's more than max, cut it in half.  I bet this almost never happens.  Handling it anyway.
+	if track_length > track_maximum:
+		message('Most popular track length was too high, cutting in half.', 2)
+		track_length = int(track_length / 2)
+	message('find_patterns: track length, by popular vote: {}'.format(track_length), 2)
+	if track_length > 0:
+		message('Longest pattern: {}'.format(patterns_by_length[0]), 2)
+	return patterns_by_length, track_length
+
+# Do a relatively quick/course scan for patterns in the bits that repeat
+# This is used for finding the track length (searching for patterns within one track)
+# and for finding sync between adjacent quarter tracks (searching for patterns that appear in both)
+# If a second track is provided, it will search (optimized slightly differently) for intertrack patterns.
+# Basic logic here is that we move a search-for window through the bit stream at the window size,
+# look for places those bits occur in the target stream, and then if a copy is found adjacent to
+# a previously found copy, merge them into a larger pattern.  Idea is that it is supposed to go fast.
+# Result is a list of patterns, organized by the point at which the source bits end.
+def find_occurrences(track, second_track = None):
+	'''Do a course-grained scan for patterns in the track'''
+	global track_maximum, track_minimum, options
+	# The first order of business is to find any zero streams (highly unreliable)
+	# so we can try to avoid them when we're doing the match.  We only care about the source bits.
+	track = find_zero_streams(track)
+	# now, start searching for patterns just after any zero streams
+
+	# matches that are less than the minimum pattern length are considered to be coincidental
+	# no point in making the search window any smaller than half the minimum pattern length
+	# making it odd because that helps a little with patterns of many 010101s.
+	# window/minimum that is much smaller (129/256) seemed to fail more.
+	minimum_pattern_length = 1000
+	window_size = 501
+	source_bits = track['bits']
+	bits = second_track['bits'] if second_track else track['bits']
+	end_margin = window_size if second_track else (window_size + track_minimum)
+	# stop checking source bits when we will hit the end (or won't have a minimal track left)
+	source_bit_stop = len(source_bits) - end_margin
+	target_bit_stop = len(bits)
+	patterns = {}
+	start_bit = 0
+	total_total_patterns = 0
+	# move the search through the source bits, gathering bits to search for a window at at time
+	while start_bit < source_bit_stop:
+		window_end = start_bit + window_size
+		bits_to_find = source_bits[start_bit: window_end]
+		occurrences = []
+		# start looking at the minimum allowable track distance away (for matches within a track)
+		# or from the beginning of the target bits (for matches between tracks).
+		# message('Occurrences: start bit {}'.format(start_bit), 2)
+		target_bit_start = 0 if second_track else (start_bit + track_minimum)
+		while True:
+			try:
+				next_occurrence = bits.index(bits_to_find, target_bit_start, target_bit_stop)
+				# found one, remember where it starts
+				occurrences.append(next_occurrence)
+				# move offset one past the first one we found and look for the next one
+				target_bit_start = next_occurrence + window_size
+				# message('Moved offset to {} and continuing'.format(offset), 2)
+			except ValueError:
+				# no more found, stop looking
+				break
+		# occurrences is now a list of absolute indices into target bit stream indicating where
+		# the bits_to_find window (from start_bit) occurs.
+		# Go through the match ranges we have established already and see if any are extended by
+		# the occurrences we just found.  They are stored in patterns, which is an array of where
+		# prior occurrences/patterns ended.  So, we're looking for patterns that end where these
+		# occurrences begin. 
+		# pattern format: key=src end, [src end, targ end, src start, targ start, length, distance]
+		# no. format is: key=src end, [match size, match dist, src start, src end, targ start, targ end]
+		if start_bit in patterns:
+			# message('found {} in patterns: {}'.format(start_bit, patterns[start_bit]), 2)
+			# there are some patterns whose first half end where the current one started
+			# go through those patterns to see if the second point ended at start of one of the current occurrences
+			# go backwards so we can delete as we go
+			for i in reversed(range(len(patterns[start_bit]))):
+				pattern = patterns[start_bit][i]
+				if pattern[5] in occurrences:
+					# end points of this pattern were in the occurrences, the pattern can be expanded.
+					# remove this from the occurrences (don't start a new pattern with it), it is handled
+					# message('occurrences before removing {}: {}'.format(pattern[0], occurrences), 2)
+					occurrences.remove(pattern[5])
+					# message('occurrences after removing {}: {}'.format(pattern[0], occurrences), 2)
+					# remove the pattern from the list of those that end at start_bit, since it will now end later.
+					# message('patterns[{}] before removing pattern {}: {}'.format(start_bit, pattern, patterns[start_bit]), 2)
+					patterns[start_bit].remove(pattern)
+					# message('patterns[{}] after removing pattern {}: {}'.format(start_bit, pattern, patterns[start_bit]), 2)
+					# pattern match now ends later and is longer
+					pattern[0] += window_size # match size increment
+					pattern[5] += window_size # target end increment
+					pattern[3] = window_end # new source end, end of window
+					# add it to patterns with a later end key
+					if window_end in patterns:
+						patterns[window_end].append(pattern)
+					else:
+						patterns.update({window_end: [pattern]})
+					# message('patterns[{}] after adding pattern {}: {}'.format(window_end, pattern, patterns[window_end]), 2)
+				else:
+					# if this pattern can NOT be extended by any of the occurrences we found,
+					# and it is too short to keep, get rid of it.
+					if pattern[0] < minimum_pattern_length:
+						patterns[start_bit].remove(pattern)
+				# clean up empty pattern list if we made one by deleting things too short to keep
+				if patterns[start_bit] == []:
+					del patterns[start_bit]
+		# we now should have used whatever occurrences we could to extend the patterns
+		# any occurrences we have left start their own new pattern, add them
+		if occurrences != [] and not window_end in patterns:
+			patterns.update({window_end: []})
+		for occurrence in occurrences:
+			patterns[window_end].append([window_size, occurrence - start_bit, start_bit, window_end, occurrence, occurrence + window_size])
+			# patterns[window_end].append([window_end, occurrence + window_size, start_bit, occurrence, window_size, occurrence - start_bit])
+		# message('patterns = {}'.format(patterns), 2)
+		total_patterns = len(patterns[window_end]) if window_end in patterns else 0
+		total_total_patterns += total_patterns
+		# message('   Current patterns at {}: {}'.format(window_end, total_patterns), 2)
+		# move on to the next window of original bits
+		start_bit = window_end
+	# message('find_occurrences: Patterns found: {} (overall internal total {})'.format(len(patterns), total_total_patterns), 2)
+	# message('patterns = {}'.format(patterns), 2)
+	# trim out the patterns that are too short (some might still have survived if they were added at the very end)
+	# Flatten the patterns and sort by match length
+	# message('Course-grained patterns (minimum length {}):'.format(minimum_pattern_length), 2)
+	for source_end in sorted(patterns):
+		for span in sorted(patterns[source_end], key=itemgetter(0)):
+			starts = [span[2], span[4]]
+			ends = [span[3], span[5]]
+			match_distance = span[1]
+			match_size = span[0]
+			if match_size < minimum_pattern_length:
+				patterns[source_end].remove(span)
+			else:
+				pass
+				# message('Size {:5d}, Distance {:5d} [{:5d}-{:5d}, {:5d}-{:5d}]'.format(match_size, match_distance, starts[0], ends[0], starts[1], ends[1]), 2)
+		if patterns[source_end] == []:
+			del patterns[source_end]
+	return patterns
 
 # Takes the tracks array, computes sync matches between adjacent tracks.  Result of sync analysis
 # is stored within the track dictionary of the higher of the tracks (modifies passed argument),
@@ -293,6 +826,15 @@ def sync_tracks(tracks):
 	'''go through the tracks to sync them together and break them into groups'''
 	global options, status
 	track_groups = []
+	# If we are only looking at whole tracks, they are too far apart to allow for syncing
+	if not options['process_halves'] and not options['process_quarters']:
+		# create a trivial track group array
+		for track in tracks:
+			track['track_group'] = len(track_groups)
+			track_groups.append({'track_group': [len(track_groups)], 'advance_average': 0})
+		return track_groups
+	message('Looking for intertrack sync and track groupings.', 2)
+	# reset the running averages
 	track_sync_average = [0, 0]
 	group_sync_average = [0, 0, 0]
 	sync_match_average = [0, 0, 0]
@@ -302,6 +844,7 @@ def sync_tracks(tracks):
 	track['sync_best'] = 0
 	track['track_group'] = 0
 	track_group = [0]
+	# go through the rest of the tracks and check sync with prior track
 	for track_index in range(1, len(tracks)):
 		track_start_clock = time.clock()
 		track = tracks[track_index]
@@ -347,6 +890,7 @@ def sync_tracks(tracks):
 		track_groups.append({'track_group': track_group, 'advance_average': group_sync_average[2]})
 	# compute the disk-wide average valid sync advance for use when we have no other guidance
 	status['sync_average'] = int(track_sync_average[0] / track_sync_average[1])
+	message('track_groups: Overall track advance average: {}'.format(status['sync_average']), 2)
 	return track_groups
 
 # This is called after we have already done the sync check and grouping between tracks
@@ -354,6 +898,11 @@ def sync_tracks(tracks):
 # just replace all of the track data with the data from one of them
 def group_tracks(tracks, track_groups):
 	'''Replace bits for tracks in the same group with bits from the best matched track'''
+	# This should probably almost never happen, it requires a match that's longer than a track.
+	# For the moment I am disabling it.
+	return tracks
+	# Go through each group of tracks to find the best sync
+	message('Consolidating track groups if sync was sufficient.', 2)
 	for track_group in track_groups:
 		group = track_group['track_group']
 		prior_track = -1
@@ -391,27 +940,6 @@ def group_tracks(tracks, track_groups):
 					# NOTE: this will result in extremely high "reliability" when reading far away from write center
 					# I doubt this is ever really a problem, but if ever some copy protection scheme *expects* noise
 					# away from the write center, it is not going to find it.
-
-	return tracks
-
-def track_patterns(tracks):
-	'''Compute the intratrack matches for each track'''
-	global options
-	for track in tracks:
-		track_start_clock = time.clock()
-		# if we consolidated this track into the group then we will have already found these patterna
-		if not 'pattern_lengths' in track:
-			track['pattern_lengths'], track['track_length'] = find_patterns(track)
-		track['match_best'] = track['pattern_lengths'][0][0] if len(track['pattern_lengths']) > 0 else 0
-		track['track_regions'] = assemble_track_regions(track['pattern_lengths'])
-
-		track['track_time'] = time.clock() - track_start_clock
-
-		# status output
-		status_length = '{:5d}'.format(track['track_length']) if 'track_length' in track else '  n/a'
-		status_match = '{:6d}'.format(track['pattern_lengths'][0][0]) if track['match_best'] > 0 else '   n/a'
-		message('Track {:5.2f}: bits: {}, matched: {}, group: {:2d}, time: {:5.2f}s'.format(\
-			track['track_number'], status_length, status_match, track['track_group'], track['track_time']), 1)
 
 	return tracks
 
@@ -552,93 +1080,6 @@ def message(message, level=0, end='\n'):
 		for output in options['console']:
 			print(message, file=output, end=end)
 
-def usage():
-	'''Display help information'''
-	print('''
-Usage: defedd.py [options] eddfile
-
-Assumption is that the EDD file was produced by I'm fEDD Up.
-Quarter tracks.
-
-Options:
-Output formats:
- -d, --dsk     Write .dsk file (data-only 16-sector standard images)
- -p, --po      Write .po file (data-only, 16-sector ProDOS ordered images)
- -n, --nib     Write .nib file (for 13-sectors and light protection)
- -t, --nit     Write .nit file (for debugging / checking against I'm fEDD Up)
- -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
- -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
- -5, --v2d     Write .v2d file (D5NI, half tracked nibbles, ok in Virtual II/STM)
- -l, --log     Write .log file of conversion output
- -x, --protect Write protect the disk image if supported (fdi)
-Analysis options:
- -z, --nibscan Use double nibble scan to find track
- -q, --quick   Skip standard sector analysis, ok for fdi/mfi/nib
- -1, --int     Consider only whole tracks (not quarter tracks)
- -2, --half    Consider only half (and whole) track (not quarter tracks)
- -c, --cheat   Write full 2.5x bit read for unparseable tracks (vs. unformatted)
- -a, --all     Write full 2.5x bit read for all tracks (i.e. cheat everywhere)
- -s, --slice   Write EDD bits to track length for unparseable tracks (cheat lite)
- -0, --zero    Write EDD bits from 0 instead of found track (slice for formatted)
- -r, --spiral  Write EDD bits in 17000-bit spiral to try to keep track sync
- -k, --keep    Do not attempt to repair bitstream
-Help and debugging:
- -h, --help    You're looking at it.
- -v, --verbose Be more verbose than usual
- -w, --werbose Be way, way (ponponpon) more verbose than usual (implies -v)
-
- Examples:
- defedd.py -d eddfile.edd (write a dsk file, standard 16-sector format)
- defedd.py -faq eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
- 	(works for Choplifter)
- defedd.py -qv eddfile.edd (write a v2d file for Virtual II)
- 	(works for standard disks so far)
- defedd.py -qn eddfile.edd (write a nib file, skip sector analysis)
- 	(works for 16-sector disks, not stress tested yet)
- defedd.py -fk eddfile.edd (write small fdi file for OE, don't fix bit slips)
- 	(works for ... nothing much yet)
- defedd.py -f eddfile.edd (write a one-revolution fdi file for OE with analysis)
- 	(works for simple 16-sector disks)
- defedd.py -mk eddfile.edd (write an mfi file for MESS, with analysis, no repairs)
- 	(does not work yet)
- 	''')
-	return
-
-# made obsolete by John Aycock's update below.  This will be removed shortly.
-# def bytes_to_bits(eddbuffer):
-# 	'''Convert bytes into component bits'''
-# 	bits = bytearray()
-# 	for byte in eddbuffer:
-# 		binbyte = bin(byte)[2:] # cuts off the 0x from the beginning
-# 		padbyte = '00000000'[len(binbyte):] + binbyte
-# 		# padbyte = '{:08b}'.format(byte) # slightly slower
-# 		# binbyte = bin(byte)[2:].zfill(8) # slightly slower
-# 		# bytebits = [int(bit) for bit in binbyte]
-# 		bytebits = [int(bit) for bit in padbyte]
-# 		bits.extend(bytebits)
-# 		# bits.extend([int(bit) for bit in bin(byte)[2:].zfill(8)])
-# 	return bits
-
-# bytes_to_bits massively sped up by John Aycock, who noticed that
-# using a lookup table would be a much faster way to do this.
-
-# initialize the lookup table in global space for later use by bytes_to_bits [JA]
-N2bits = []
-for i in range(256):
-	n = (1 << 8) | i
-	binbyte = bin(n)[3:]            # cuts off '0x1' from the beginning
-	bitlist = [int(bit) for bit in binbyte]
-	assert len(bitlist) == 8
-	N2bits.append(bitlist)
-
-# run through the buffer and use the lookup table to blast the bits onto the array [JA]
-def bytes_to_bits(eddbuffer):
-	'''Convert bytes into component bits'''
-	bits = bytearray()
-	for byte in eddbuffer:
-		bits.extend(N2bits[byte])
-	return bits
-
 def grab_nibble(bits):
 	'''Take the first nibble off the bit stream that was passed in'''
 	offset = 0
@@ -663,107 +1104,13 @@ def grab_nibble(bits):
 	# if we run out of data, return what we had, though it is probably useless to do so.	
 	return {'nibble': data_register, 'leading_zeros': leading_zeros, 'offset': offset}
 
-# Do a relatively quick/course scan for patterns in the bits that repeat
-# This is used for finding the track length (searching for patterns within one track)
-# and for finding sync between adjacent quarter tracks (searching for patterns that appear in both)
-# If a second track is provided, it will search (optimized slightly differently) for intertrack patterns.
-def find_occurrences(track, second_track = None):
-	'''Do a course-grained scan for patterns in the track'''
-	global track_maximum, track_minimum, options
-	if second_track:
-		# we are searching between two tracks
-		source_bits = track['bits']
-		bits = second_track['bits']
-		window_size = 300
-		start_bit_stop = len(source_bits) - window_size
-		second_length = len(bits)
-	else:
-		# we are searching within one track
-		source_bits = track['bits']
-		bits = track['bits']
-		window_size = 64
-		start_bit_stop = len(bits) - (track_maximum + window_size)
-	patterns = {}
-	start_bit = 0
-	total_total_patterns = 0
-	# move the search through the source bits, gathering bits to search for a window at at time
-	while start_bit < start_bit_stop:
-		bits_to_find = source_bits[start_bit: start_bit + window_size]
-		occurrences = []
-		# start looking at the minimum allowable track distance away (for matches within a track)
-		# or from the beginning of the target bits (for matches between tracks).
-		# message('Occurrences: start bit {}'.format(start_bit), 2)
-		offset = 0 if second_track else (start_bit + track_minimum)
-		if options['bitstring']:
-			check_end = second_length if second_track else (offset + (track_maximum - track_minimum) + window_size)
-			occurrences = list(bits.findall(bits_to_find, offset, check_end))
-			# message('Occurrences at {}: {}'.format(start_bit, len(occurrences)), 2)
-		else:
-			while True:
-				# to speed up search, only look as far ahead as we would be willing to accept
-				# for intratrack matching, this is trk_max away from the start bit (offset is already at trk_min)
-				# for intertrack matching, take the whole track, we'll even accept two tracks away
-				check_end = second_length if second_track else (offset + (track_maximum - track_minimum) + window_size)
-				# message('Looking between {} and {} for bits starting at {}'.format(offset, check_end, start_bit), 2)
-				try:
-					next_occurrence = bits.index(bits_to_find, offset, check_end)
-					# found one, remember where it starts
-					occurrences.append(next_occurrence)
-					# move offset one past the first one we found and look for the next one
-					offset = next_occurrence + window_size
-					# message('Moved offset to {} and continuing'.format(offset), 2)
-				except ValueError:
-					# no more found, stop looking
-					break
-		# occurrences is now a list of absolute indices into bit stream indicating where
-		# the window (from start_bit) occurs.
-		# Go through the match ranges we have established already and see if any are extended by
-		# the occurrences we just found.
-		window_end = start_bit + window_size
-		if start_bit in patterns:
-			# there are some patterns whose first half end where the current one started
-			# go through those patterns to see if the second point ended at start of one of the current occurrences
-			for pattern in patterns[start_bit]:
-				if pattern[0] in occurrences:
-					# end points of this pattern were in the occurrences, the pattern can be expanded.
-					# remove this from the occurrences (don't start a new pattern with it), it is handled
-					occurrences.remove(pattern[0])
-					# remove the pattern from the list of those that end at start_bit, since it will now end later.
-					patterns[start_bit].remove(pattern)
-					# pattern match now ends later
-					pattern[0] += window_size
-					# add it to patterns with a later end key
-					if window_end in patterns:
-						patterns[window_end].append(pattern)
-					else:
-						patterns.update({window_end: [pattern]})
-				else:
-					# if this occurrence does NOT extend this pattern
-					# and the pattern is too short to keep, throw it back
-					if pattern[0] - pattern[2] < 600:
-						patterns[start_bit].remove(pattern)
-				# clean up empty pattern list if we made one
-				if patterns[start_bit] == []:
-					del patterns[start_bit]
-		# we now should have used whatever occurrences we could to extend the patterns
-		# any occurrences we have left start their own new pattern, add them
-		if occurrences != [] and not window_end in patterns:
-			patterns.update({window_end: []})
-		for occurrence in occurrences:
-			patterns[window_end].append([occurrence + window_size, start_bit, occurrence])
-		# message('patterns = {}'.format(patterns), 2)
-		total_patterns = len(patterns[window_end]) if window_end in patterns else 0
-		total_total_patterns += total_patterns
-		# message('   Current patterns at {}: {}'.format(window_end, total_patterns), 2)
-		# move on to the next window of original bits
-		start_bit = window_end
-	# message('Patterns found: {} (overall internal total {})'.format(len(patterns), total_total_patterns), 2)
-	return patterns
-
 # This can be SLOW.  This can be very slow.  I've seen it take almost 4 minutes on a track, even if it
 # is usually way faster.  I'm not sure what property causes the slowness but I want to eradicate whatever it is.
-def find_patterns(track, second_track = None):
+# Also, I'm not entirely convinced this is important.  
+# This is made obsolete for the moment by a shorter version that does not maximize the matches.  Possibly get rid of this.
+def find_patternsx(track, second_track = None):
 	'''Take course-grained scan and maximize matching patterns in track'''
+	# First, get a course match, only valid up to the window size used in find_occurrences.
 	occurrences = find_occurrences(track, second_track)
 	# Now, patterns has a decent rough cut of where repeats were found, but they are not necessarily
 	# as big as they can be.  So, sort the patterns (which will sort them by start bit of the earlier bits),
@@ -937,7 +1284,7 @@ def find_patterns(track, second_track = None):
 			message('No matches :(', 2)
 	return patterns_by_length, track_length
 
-# Rather than re-finding patterns if I cut the beginning off of a track, just go through ad eliminate
+# Rather than re-finding patterns if I cut the beginning off of a track, just go through and eliminate
 def adjust_patterns(pattern_lengths, cut_point):
 	'''Adjust pattern_lengths to accommodate cutting off beginning of track bits without recomputing'''
 	global track_maximum
@@ -973,91 +1320,92 @@ def adjust_patterns(pattern_lengths, cut_point):
 	adjusted_lengths.sort(key = itemgetter(0), reverse = True)
 	return adjusted_lengths, track_length
 
-def find_zero_streams(track):
-	'''Locate streams of bits that look to contain more zeros in a row than the amplifier can handle'''
-	global options, threezeros
-	# Find regions in the track that seem to be stretches of 0s, these are at great risk of
-	# being misread, since the amplifier randomly produces spurious 1s if it reads too many 0s in a row.
-	bits = track['bits']
-	zero_streams = []
-	index  = 0
-	in_zero_stream = False # Presume we did not start in the middle of a bunch of zeros.
-	zero_stream_start = 0
-	while index < len(bits):
-		# find the next 000
-		if not in_zero_stream:
-			# if we're out of a zero stream go find the next one
-			try:
-				next_000 = bits.index(threezeros, index)
-				index = next_000
-				zero_stream_start = index
-				in_zero_stream = True
-			except ValueError:
-				# no more 000s, we're done checking
-				break
+# break the patterns down by track distance
+def split_patterns_by_distance(pattern_lengths):
+	patterns_by_distance = {}
+	canonical_track_length = pattern_lengths[0][1]
+	radius = 0
+	# split the patterns by track distance as an offset from the canonical
+	for pattern in pattern_lengths:
+		delta = abs(pattern[1] - canonical_track_length)
+		if delta in patterns_by_distance:
+			patterns_by_distance[delta].append(pattern)
 		else:
-			# we are in a zero stream
-			if bits[index] == 0x01:
-				# only check for the end when we hit a 1
-				# look for the next 000 within 25 bits
-				try:
-					next_000 = bits.index(threezeros, index, index + 25)
-				except ValueError:
-					# There are no 000s in sight, we're done with the zero stream
-					if index - zero_stream_start > 3:
-						# this one is long enough to save
-						zero_streams.append([zero_stream_start, index])
-					in_zero_stream = False
-		index += 1
-	# if we ended with a zero stream open, close it
-	if in_zero_stream and index - zero_stream_start > 4:
-		zero_streams.append([zero_stream_start, index - 1])
-	# brag about what we found
-	if False:
-		message('Zero streams found in track:', 2)
-		for zero_stream in zero_streams:
-			message('{} to {} ({} bits long)'.format(zero_stream[0], zero_stream[1], zero_stream[1] - zero_stream[0]), 2)
-	return zero_streams
+			patterns_by_distance.update({delta: [pattern]})
+	# flatten it again
+	flat_patterns = []
+	for delta in patterns_by_distance:
+		for pattern in patterns_by_distance[delta]:
+			flat_patterns.append(pattern)
+	return flat_patterns
 
+# Build a list of the regions by going down in order of decreasing size and overlaying them until all match regions
+# are accounted for.
+# This can go badly wrong where there are large regions of identical patterns (like sync bytes) unless we control for
+# track length.
 def assemble_track_regions(pattern_lengths):
 	'''Traverse match regions in decreasing size and reconcile them for track coverage'''
 	# Now, build a track by working down through the match lengths and overlaying them
+	patterns_by_distance = split_patterns_by_distance(pattern_lengths)
 	track_regions = []
-	minimal_match = 300 # toss out anything that does not match at least this long
-	for pattern in pattern_lengths:
+	for pattern in patterns_by_distance:
+		# message('Checking pattern against regions already collected: {}'.format(pattern), 2)
 		# check to see if this pattern conflicts with another one, and if so, skip it
 		# since we are working downwards in matching lengths, priority is automatically to the longer match
-		cleared_to_add = pattern[0] > minimal_match
-		if cleared_to_add:
-			for check_region in track_regions:
-				if not (pattern[2] >= check_region[1] or pattern[3] < check_region[0]):
-					# this overlaps with a region we already had
-					# try to cut it back to the part that does not overlap.
-					if pattern[2] >= check_region[0] and pattern[3] <= check_region[1]:
-						# it is entirely contained within the region we already have, so skip it
-						# message('Skipping, {} contained in {}'.format(pattern, check_region), 2)
-						cleared_to_add = False
-						break
-					elif pattern[2] < check_region[0]:
-						# pattern starts before check region, so
-						# cut the end of the pattern back to where check region starts
-						# message('Pre-trimmed region is {}'.format(pattern), 2)
-						adjustment = pattern[3] - check_region[0]
-						pattern[3] -= adjustment
-						pattern[5] -= adjustment
-						pattern[0] = pattern[3] - pattern[2]
-						# message('Trimmed {} for overlap with {}'.format(pattern, check_region), 2)
-					else:
-						# pattern ends after check region, so
-						# cut the beginning of the pattern forward to where check region ends
-						# message('Pre-trimmed region is {}'.format(pattern), 2)
-						adjustment = check_region[1] - pattern[2]
-						pattern[2] += adjustment
-						pattern[4] += adjustment
-						pattern[0] = pattern[3] - pattern[2]
-						# message('Trimmed {} for overlap with {}'.format(pattern, check_region), 2)
+		cleared_to_add = True
+		for check_region in track_regions:
+			# message('--comparing region: {}'.format(check_region), 2)
+			# unless pattern starts after end of current region or ends before beginning of current region,
+			# there is at least some overlap.
+			if not (pattern[2] >= check_region[1] or pattern[3] < check_region[0]):
+				# if pattern starts after current region and ends before current region, it is entirely contained.
+				# I'm not convinced this could ever happen, but I'm checking for it just the same.
+				if pattern[2] >= check_region[0] and pattern[3] <= check_region[1]:
+					# it is entirely contained within the region we already have, so skip it
+					# message('Skipping, {} contained in {}'.format(pattern, check_region), 2)
+					# message('--** pattern contained in region, skipping to next pattern.')
+					cleared_to_add = False
 					break
-		# if there is no conflict, add this to the track coverage
+				# there is some overlap between current region and pattern.
+				# The fact that they aren't a single region suggests that there could be a missed/extra bit
+				# but there can't have been a lot of them if they overlap.  Allow 2 bits, anything more, discard.
+				elif abs(pattern[1] - (check_region[2] - check_region[0])) > 2:
+					# track distance for pattern is more than two different from track distance for check_region
+					# it does not match a prior region it abuts, so abort
+					# (even if it might abut another region more closely).
+					# message('--** pattern distance more than 2 from region distance ({})'.format(check_region[2] - check_region[1]), 2)
+					cleared_to_add = False
+					break
+				# if pattern starts before current region, then end of pattern overlaps beginning of region.
+				# in this case, current region wins, lop off the end of the pattern.
+				elif pattern[2] < check_region[0]:
+					# pattern starts before check region, so
+					# cut the end of the pattern back to where check region starts
+					# message('Pre-trimmed region is {}'.format(pattern), 2)
+					adjustment = pattern[3] - check_region[0] # moving end back to region start
+					pattern[3] -= adjustment # move source end back
+					pattern[5] -= adjustment # move target end back
+					pattern[0] = pattern[3] - pattern[2] # recompute length
+					# message('--** pattern overlaps region, chopped end to {}.'.format(pattern), 2)
+					# message('Trimmed {} for overlap with {}'.format(pattern, check_region), 2)
+				# only other option is that pattern ends after current region, so beginning of pattern overlaps end of region.
+				# again, region wins, lop off the beginning of the pattern.
+				else:
+					# pattern ends after check region, so
+					# cut the beginning of the pattern forward to where check region ends
+					# message('Pre-trimmed region is {}'.format(pattern), 2)
+					adjustment = check_region[1] - pattern[2] # move beginning forward to region end
+					pattern[2] += adjustment # move source beginning forward
+					pattern[4] += adjustment # move target beginning forward
+					pattern[0] = pattern[3] - pattern[2] # recompute length
+					# message('--** pattern overlaps region, chopped beginning to {}.'.format(pattern), 2)
+					# message('Trimmed {} for overlap with {}'.format(pattern, check_region), 2)
+				# there used to be a break here, but a single pattern could overlay two bigger ones, we need to check them all
+				# break
+
+			# There was no overlap between this region and the pattern, go back and check the rest of the regions.
+		# so long as the pattern was not entirely within an existing region, add it.
+		# Still unsure if this case could come up.
 		if cleared_to_add:
 			# message('Adding region {}'.format(pattern), 2)
 			track_regions.append([pattern[2], pattern[3], pattern[4], pattern[5]])
@@ -1188,9 +1536,18 @@ def find_check_bits(track, track_region, track_map):
 
 	return check_bits
 
-def build_track_map(track):
+# I accidentally named a second thing build_track_map.  This may be something else.
+
+def build_track_mapx(track):
 	'''Go through track regions and assemble a map of matches and gaps for the track'''
-	# go through the regions in order, to locate a map of the track containing matches and gaps
+	# go through the regions in order, to form a map of the track containing matches and gaps
+	# this assumes that track_regions are sorted by start position.  It's possible for two big matches
+	# to be separated by one or more little matches at wildly different track distances.
+	# We figured a "tolerance" for bit slop based on how many zero spans there seem to be, but this is
+	# really a more local thing.  If we have a big match at 51000 and a couple little matches and then a
+	# big match at 51050, we really can't permit any matches between them to be anything outside that range.
+	# So, then the trick is differenting big from little matches.  So, maybe this should already have been
+	# done in the region computation.
 	track_length = track['track_length']
 	tolerance = track['tolerance']
 	zero_streams = track['zero_streams']
@@ -1381,6 +1738,8 @@ def resolve_bits(track):
 	global track_maximum, track_minimum, options, threezeros
 
 	# If the match was long enough to include a whole track, we can short-circuit the analysis
+	# TODO: Wait, if it matches like 1.5x a track, does it set the track to be 1.5x too long?  Make sure it doesn't.
+	# I'm kind of tempted to remove this, it's not going to speed things up much and it won't yield any different results.
 	if track['match_best'] > track_maximum:
 		best_match = track['pattern_lengths'][0]
 		track['track_length'] = best_match[1]
@@ -1393,13 +1752,13 @@ def resolve_bits(track):
 	pattern_lengths = track['pattern_lengths']
 	track_length = track['track_length']
 
-	track['zero_streams'] = find_zero_streams(track)
+	track = find_zero_streams(track)
 	# count how many triple zeros we have and base the tolerance for track length mismatch on that
 	# I am just kind of eyeballing it here.
 	count_000 = bits.count(threezeros)
 	track['tolerance'] = int(count_000 / 75) + 15
 	message('We found {} 000s in the bit stream, tolerance is {}.'.format(count_000, track['tolerance']), 2)
-	track['track_map'] = build_track_map(track)
+	track['track_map'] = build_track_mapx(track)
 	# we have a map of the matches and the gaps now to walk through, everything should be contiguous.
 	# so now we try to resolve the bits in the gaps between matches
 	track_shrink = 0
@@ -2320,27 +2679,6 @@ def locate_sectors(track):
 		message('', 2)
 	return track
 
-def dos_order(logical_sector):
-	'''DOS 3.3 sector skewing'''
-	return {
-		0x00: 0x00, 0x01: 0x0d, 0x02: 0x0b, 0x03: 0x09, 0x04: 0x07, 0x05: 0x05, 0x06: 0x03, 0x07: 0x01,
-		0x08: 0x0e, 0x09: 0x0c, 0x0a: 0x0a, 0x0b: 0x08, 0x0c: 0x06, 0x0d: 0x04, 0x0e: 0x02, 0x0f: 0x0f,
-		}[logical_sector]
-
-def prodos_order(logical_sector):
-	'''ProDOS sector skewing'''
-	return {
-		0x00: 0x00, 0x01: 0x02, 0x02: 0x04, 0x03: 0x06, 0x04: 0x08, 0x05: 0x0a, 0x06: 0x0c, 0x07: 0x0e,
-		0x08: 0x01, 0x09: 0x03, 0x0a: 0x05, 0x0b: 0x07, 0x0c: 0x09, 0x0d: 0x0b, 0x0e: 0x0d, 0x0f: 0x0f,
-		}[logical_sector]
-
-def cpm_order(logical_sector):
-	'''CP/M sector skewing'''
-	return {
-		0x00: 0x00, 0x01: 0x0c, 0x02: 0x08, 0x03: 0x04, 0x04: 0x0b, 0x05: 0x07, 0x06: 0x03, 0x07: 0x0f,
-		0x08: 0x06, 0x09: 0x02, 0x0a: 0x0e, 0x0b: 0x0a, 0x0c: 0x01, 0x0d: 0x0d, 0x0e: 0x09, 0x0f: 0x05,
-		}[logical_sector]
-
 def consolidate_sectors(track):
 	'''Consolidate all the sectors we found into a standard 13/16 for writing to dsk'''
 	global options
@@ -2536,54 +2874,6 @@ def decode_53(encoded_data):
 	decoded_data[255] = (encoded_data[255] << 3) + encoded_data[409]
 	return decoded_data
 
-def translate_62(nibble):
-	'''Nibble translate table for 6+2 encoding'''
-	try:
-		translation = {
-			0x96: 0x00, 0x97: 0x01, 0x9a: 0x02, 0x9b: 0x03, 0x9d: 0x04, 0x9e: 0x05, 0x9f: 0x06, 0xa6: 0x07,
-			0xa7: 0x08, 0xab: 0x09, 0xac: 0x0a, 0xad: 0x0b, 0xae: 0x0c, 0xaf: 0x0d, 0xb2: 0x0e, 0xb3: 0x0f,
-			0xb4: 0x10, 0xb5: 0x11, 0xb6: 0x12, 0xb7: 0x13, 0xb9: 0x14, 0xba: 0x15, 0xbb: 0x16, 0xbc: 0x17,
-			0xbd: 0x18, 0xbe: 0x19, 0xbf: 0x1a, 0xcb: 0x1b, 0xcd: 0x1c, 0xce: 0x1d, 0xcf: 0x1e, 0xd3: 0x1f,
-			0xd6: 0x20, 0xd7: 0x21, 0xd9: 0x22, 0xda: 0x23, 0xdb: 0x24, 0xdc: 0x25, 0xdd: 0x26, 0xde: 0x27,
-			0xdf: 0x28, 0xe5: 0x29, 0xe6: 0x2a, 0xe7: 0x2b, 0xe9: 0x2c, 0xea: 0x2d, 0xeb: 0x2e, 0xec: 0x2f,
-			0xed: 0x30, 0xee: 0x31, 0xef: 0x32, 0xf2: 0x33, 0xf3: 0x34, 0xf4: 0x35, 0xf5: 0x36, 0xf6: 0x37,
-			0xf7: 0x38, 0xf9: 0x39, 0xfa: 0x3a, 0xfb: 0x3b, 0xfc: 0x3c, 0xfd: 0x3d, 0xfe: 0x3e, 0xff: 0x3f,
-		}[nibble]
-	except:
-		# TODO: Invalidate the data block in this situation. Checksum should fail anyway, though.
-		translation = 0x00
-	return translation
-
-def translate_53(nibble):
-	'''Nibble translate table for 5+3 encoding'''
-	try:
-		translation = {
-			0xab: 0x00, 0xad: 0x01, 0xae: 0x02, 0xaf: 0x03, 0xb5: 0x04, 0xb6: 0x05, 0xb7: 0x06, 0xba: 0x07,
-			0xbb: 0x08, 0xbd: 0x09, 0xbe: 0x0a, 0xbf: 0x0b, 0xd6: 0x0c, 0xd7: 0x0d, 0xda: 0x0e, 0xdb: 0x0f,
-			0xdd: 0x10, 0xde: 0x11, 0xdf: 0x12, 0xea: 0x13, 0xeb: 0x14, 0xed: 0x15, 0xee: 0x16, 0xef: 0x17,
-			0xf5: 0x18, 0xf6: 0x19, 0xf7: 0x1a, 0xfa: 0x1b, 0xfb: 0x1c, 0xfd: 0x1d, 0xfe: 0x1e, 0xff: 0x1f,
-		}[nibble]
-	except:
-		# TODO: Invalidate the data block in this situation. Checksum should fail anyway, though.
-		translation = 0x00
-	return translation
-
-def bits_to_bytes(bits):
-	bit_offset = 0
-	bytes = bytearray()
-	local_bits = bits.copy() # without this, it was altering the bits for the caller
-	local_bits.extend([0, 0, 0, 0, 0, 0, 0, 0])
-	for bit_offset in range(0, len(local_bits), 8):
-		bytes.append(bits_to_byte(local_bits[bit_offset: bit_offset + 8]))
-	return bytes
-
-def bits_to_byte(bits):
-	byte = 0
-	for bit in bits:
-		byte = byte << 1
-		if bit == 1:
-			byte += 1
-	return byte
 
 def display_bits(label, bit_array, level, end="\n"):
 	message(label, level, end='')
@@ -2695,6 +2985,11 @@ def write_v2d_file(eddfile, tracks):
 					# TODO: Maybe try to use sync_nibstart like .nib writing does.  Not now, though.
 					# This should write as many nibbles as we have, if it is fewer than nibs_to_write
 					v2dfile.write(track['track_nibbles'])
+
+# Write a png file representation of the bits
+# Inspired by (and bits of code lightly lifted/adapted from) Charles Mangin's HackFest entry at KansasFest 2015
+def write_png_file(eddfile, tracks):
+	pass
 
 def write_fdi_file(eddfile, tracks):
 	'''Write the data out in the form of an FDI file'''
@@ -2884,6 +3179,307 @@ def write_mfi_file(eddfile, tracks):
 							mfifile.write(mfitrackdata[track])
 			else:
 				break
+
+def translate_62(nibble):
+	'''Nibble translate table for 6+2 encoding'''
+	try:
+		translation = {
+			0x96: 0x00, 0x97: 0x01, 0x9a: 0x02, 0x9b: 0x03, 0x9d: 0x04, 0x9e: 0x05, 0x9f: 0x06, 0xa6: 0x07,
+			0xa7: 0x08, 0xab: 0x09, 0xac: 0x0a, 0xad: 0x0b, 0xae: 0x0c, 0xaf: 0x0d, 0xb2: 0x0e, 0xb3: 0x0f,
+			0xb4: 0x10, 0xb5: 0x11, 0xb6: 0x12, 0xb7: 0x13, 0xb9: 0x14, 0xba: 0x15, 0xbb: 0x16, 0xbc: 0x17,
+			0xbd: 0x18, 0xbe: 0x19, 0xbf: 0x1a, 0xcb: 0x1b, 0xcd: 0x1c, 0xce: 0x1d, 0xcf: 0x1e, 0xd3: 0x1f,
+			0xd6: 0x20, 0xd7: 0x21, 0xd9: 0x22, 0xda: 0x23, 0xdb: 0x24, 0xdc: 0x25, 0xdd: 0x26, 0xde: 0x27,
+			0xdf: 0x28, 0xe5: 0x29, 0xe6: 0x2a, 0xe7: 0x2b, 0xe9: 0x2c, 0xea: 0x2d, 0xeb: 0x2e, 0xec: 0x2f,
+			0xed: 0x30, 0xee: 0x31, 0xef: 0x32, 0xf2: 0x33, 0xf3: 0x34, 0xf4: 0x35, 0xf5: 0x36, 0xf6: 0x37,
+			0xf7: 0x38, 0xf9: 0x39, 0xfa: 0x3a, 0xfb: 0x3b, 0xfc: 0x3c, 0xfd: 0x3d, 0xfe: 0x3e, 0xff: 0x3f,
+		}[nibble]
+	except:
+		# TODO: Invalidate the data block in this situation. Checksum should fail anyway, though.
+		translation = 0x00
+	return translation
+
+def translate_53(nibble):
+	'''Nibble translate table for 5+3 encoding'''
+	try:
+		translation = {
+			0xab: 0x00, 0xad: 0x01, 0xae: 0x02, 0xaf: 0x03, 0xb5: 0x04, 0xb6: 0x05, 0xb7: 0x06, 0xba: 0x07,
+			0xbb: 0x08, 0xbd: 0x09, 0xbe: 0x0a, 0xbf: 0x0b, 0xd6: 0x0c, 0xd7: 0x0d, 0xda: 0x0e, 0xdb: 0x0f,
+			0xdd: 0x10, 0xde: 0x11, 0xdf: 0x12, 0xea: 0x13, 0xeb: 0x14, 0xed: 0x15, 0xee: 0x16, 0xef: 0x17,
+			0xf5: 0x18, 0xf6: 0x19, 0xf7: 0x1a, 0xfa: 0x1b, 0xfb: 0x1c, 0xfd: 0x1d, 0xfe: 0x1e, 0xff: 0x1f,
+		}[nibble]
+	except:
+		# TODO: Invalidate the data block in this situation. Checksum should fail anyway, though.
+		translation = 0x00
+	return translation
+
+def dos_order(logical_sector):
+	'''DOS 3.3 sector skewing'''
+	return {
+		0x00: 0x00, 0x01: 0x0d, 0x02: 0x0b, 0x03: 0x09, 0x04: 0x07, 0x05: 0x05, 0x06: 0x03, 0x07: 0x01,
+		0x08: 0x0e, 0x09: 0x0c, 0x0a: 0x0a, 0x0b: 0x08, 0x0c: 0x06, 0x0d: 0x04, 0x0e: 0x02, 0x0f: 0x0f,
+		}[logical_sector]
+
+def prodos_order(logical_sector):
+	'''ProDOS sector skewing'''
+	return {
+		0x00: 0x00, 0x01: 0x02, 0x02: 0x04, 0x03: 0x06, 0x04: 0x08, 0x05: 0x0a, 0x06: 0x0c, 0x07: 0x0e,
+		0x08: 0x01, 0x09: 0x03, 0x0a: 0x05, 0x0b: 0x07, 0x0c: 0x09, 0x0d: 0x0b, 0x0e: 0x0d, 0x0f: 0x0f,
+		}[logical_sector]
+
+def cpm_order(logical_sector):
+	'''CP/M sector skewing'''
+	return {
+		0x00: 0x00, 0x01: 0x0c, 0x02: 0x08, 0x03: 0x04, 0x04: 0x0b, 0x05: 0x07, 0x06: 0x03, 0x07: 0x0f,
+		0x08: 0x06, 0x09: 0x02, 0x0a: 0x0e, 0x0b: 0x0a, 0x0c: 0x01, 0x0d: 0x0d, 0x0e: 0x09, 0x0f: 0x05,
+		}[logical_sector]
+
+def bits_to_bytes(bits):
+	bit_offset = 0
+	bytes = bytearray()
+	local_bits = bits.copy() # without this, it was altering the bits for the caller
+	local_bits.extend([0, 0, 0, 0, 0, 0, 0, 0])
+	for bit_offset in range(0, len(local_bits), 8):
+		bytes.append(bits_to_byte(local_bits[bit_offset: bit_offset + 8]))
+	return bytes
+
+def bits_to_byte(bits):
+	byte = 0
+	for bit in bits:
+		byte = byte << 1
+		if bit == 1:
+			byte += 1
+	return byte
+
+# bytes_to_bits massively sped up by John Aycock, who noticed that
+# using a lookup table would be a much faster way to do this.
+
+# initialize the lookup table in global space for later use by bytes_to_bits [JA]
+N2bits = []
+for i in range(256):
+	n = (1 << 8) | i
+	binbyte = bin(n)[3:]            # cuts off '0x1' from the beginning
+	bitlist = [int(bit) for bit in binbyte]
+	assert len(bitlist) == 8
+	N2bits.append(bitlist)
+
+# run through the buffer and use the lookup table to blast the bits onto the array [JA]
+def bytes_to_bits(eddbuffer):
+	'''Convert bytes into component bits'''
+	bits = bytearray()
+	for byte in eddbuffer:
+		bits.extend(N2bits[byte])
+	return bits
+
+# Main entry point and options processing
+def main(argv=None):
+	'''Main entry point'''
+	global options, status
+
+	print("defedd - analyze and convert EDD files.")
+
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], "hndfmp5txl1qcak0sryvw2u", \
+			["help", "nib", "dsk", "fdi", "mfi", "po", "v2d", "nit", "protect", "log",
+				"int", "quick", "cheat", "all", "keep", "zero", "slice", "spiral", "sync",
+				"verbose", "werbose", "half", "nic"])
+	except getopt.GetoptError as err:
+		print(str(err))
+		usage()
+		return 1
+
+	for o, a in opts:
+		if o == "-h":
+			usage()
+			return 0
+		# output file type options
+		elif o == "-f" or o == "--fdi":
+			options['output']['fdi'] = write_fdi_file
+			# options['output']['fdi'] = eddfilename + ".fdi"
+			print("Will save fdi file.")
+		elif o == "-m" or o == "--mfi":
+			options['output']['mfi'] = write_mfi_file
+			print("Will save mfi file.")
+		elif o == "-5" or o == "--v2d":
+			options['output']['v2d'] = write_v2d_file
+			print("Will save v2d/d5ni file.")
+		elif o == "-u" or o == "--nic":
+			options['output']['nic'] = write_nic_file
+			print("Will save UNISDISK NIC file.")
+		elif o == "-n" or o == "--nib":
+			options['output']['nib'] = write_nib_file
+			print("Will save nib file.")
+		elif o == "-g" or o == "--png":
+			options['output']['png'] = write_png_file
+			print("Will save png file.")
+		# elif o == "-t" or o == "--nit":
+		# 	options['output']['nit'] = write_nit_file
+		# 	print("Will save nit (nibble timing) file.")
+		elif o == "-d" or o == "--dsk":
+			options['output']['dsk'] = write_dsk_file
+			print("Will save dsk file (DOS 3.3 order, a.k.a. .do).")
+		# elif o == "-p" or o == "--po":
+		# 	options['output']['po'] = write_po_file
+		# 	print("Will save ProDOS-ordered po (dsk-like) file.")
+		elif o == "-l" or o == "--log":
+			options['write_log'] = True
+			print("Will save log file.")
+		# other options
+		elif o == "-x" or o == "--protect":
+			options['write_protect'] = True
+			print("Will write image as write-protected if supported (FDI)")
+		elif o == "-1" or o == "--int":
+			options['process_quarters'] = False
+			options['process_halves'] = False
+			print("Will process only whole tracks.")
+		elif o == "-2" or o == "--half":
+			options['process_quarters'] = False
+			options['process_halves'] = True
+			print("Will process only half tracks.")
+		elif o == "-q" or o == "--quick":
+			options['analyze_sectors'] = False
+			print("Will skip sector search.")
+		elif o == "-c" or o == "--cheat":
+			options['write_full'] = True
+			print("Cheat and write full EDD 2.5x sample if can't find track boundary.")
+		elif o == "-k" or o == "--keep":
+			options['repair_tracks'] = False
+			print("Will not attempt to repair bitstream.")
+		elif o == "-y" or o == "--sync":
+			options['sync_tracks'] = False
+			print("Will attempt to sync the tracks.")
+		# elif o == "-2" or o == "--second":
+		# 	options['use_second'] = True
+		# 	print("Will use second track copy in sample.")
+		elif o == "-a" or o == "--all":
+			options['no_translation'] = True
+			print("Will write full tracks for all tracks.")
+		elif o == "-0" or o == "--zero":
+			options['from_zero'] = True
+			print("Will write track-length bits starting from beginning of EDD sample for all tracks.")
+		elif o == "-r" or o == "--spiral":
+			options['spiral'] = True
+			print("Will try to keep tracks in sync.")
+		elif o == "-s" or o == "--slice":
+			options['use_slice'] = True
+			print("Will write track-length bits starting from beginning of EDD sample for unparseable tracks")
+		elif o == "-v" or o == "--verbose":
+			options['verbose'] = True
+			print("Will be more chatty about progress than usual.")
+		elif o == "-w" or o == "--werbose":
+			options['verbose'] = True
+			options['werbose'] = True
+			print('''
+It was a dark and stormy night.  On the screen, a cursor in a terminal window
+glowed invitingly, like a candle behind a frosty ground-floor window of a
+run-down Victorian inn.  The inn had seen better days.  Travelers were few and
+far between now that the railway station had closed, prospective lodgers being
+whisked onward to the rambunctious squalor of the larger nearby cities.  The
+wind whistled angrily, pushing a draft through the deteriorating walls and
+causing the candle to flicker, much like a cursor in a dark terminal window.
+Our story begins with a single command, cautiously typed at a prompt. . .
+''')
+
+	try:
+		eddfilename = args[0]
+	except:
+		print('You need to provide the name of an EDD file to begin.')
+		return 1
+
+	options['output_basename'] = eddfilename
+
+	# Do some sanity checking
+	# To write dsk files we need to do the sector analysis, for others it is not needed
+	if options['output']['dsk'] and not options['analyze_sectors']:
+		print('It is necessary to analyze sectors in order to write a .dsk file, turning that option on.')
+		options['analyze_sectors'] = True
+	# To write pure EDD->fdi files (which OpenEmulator can handle), we don't need to do any analysis.
+	# If user picked no translation but picked something other than fdi, turn no translation off
+	if options['no_translation']:
+		options['analyze_bits'] = False
+		options['analyze_nibbles'] = False
+		for output_file in options['output'].items():
+			if output_file[1] and not (output_file[0] == 'fdi' or output_file[0] == 'nic'):
+				print('No translation is only valid for fdi, but since you picked a different output format, analysis is still needed.')
+				options['analyze_bits'] = True
+				options['analyze_nibbles'] = True
+				break
+
+	if options['spiral'] and not (options['process_halves'] or options['process_quarters']):
+		print('Cannot do track sync without at least processing half tracks, quarter tracks is better.')
+		print('Processing half tracks for now.')
+		options['process_halves'] = True
+
+	# TODO: Improve the style of the quarter/half/whole track decisionmaking here
+	if options['process_quarters'] and not options['output']['mfi'] and not options['output']['fdi']:
+		options['process_quarters'] = False
+		if options['process_halves'] and not options['output']['v2d']:
+			print('Only processing whole tracks, no sense in processing quarter tracks unless they will be stored.')
+			options['process_halves'] = False
+		else:
+			print('Only processing half tracks, no sense in processing quarter tracks unless they will be stored.')
+	# I think I am going to remove the po option for now until I settle the analysis portion
+	# if options['output']['dsk'] and options['output']['po']:
+	# 	options['output']['po'] = False
+	# 	print('Writing dsk and po are mutually exclusive, will write dsk and not po.')
+	# TODO: Maybe there is other sanity checking to do here, add if it occurs to me
+
+	analyze_disk()
+	return 1
+
+def usage():
+	'''Display help information'''
+	print('''
+Usage: defedd.py [options] eddfile
+
+Assumption is that the EDD file was produced by I'm fEDD Up.
+Quarter tracks.
+
+Options:
+Output formats:
+ -d, --dsk     Write .dsk file (data-only 16-sector standard images)
+ -p, --po      Write .po file (data-only, 16-sector ProDOS ordered images)
+ -n, --nib     Write .nib file (for 13-sectors and light protection)
+ -t, --nit     Write .nit file (for debugging / checking against I'm fEDD Up)
+ -m, --mfi     Write .mfi file (MESS Floppy image simulated flux image)
+ -f, --fdi     Write .fdi file (bitstream, cheated images ok in OpenEmulator)
+ -5, --v2d     Write .v2d file (D5NI, half tracked nibbles, ok in Virtual II/STM)
+ -g, --png     Write .png file representation (only for -faq at the moment)
+ -l, --log     Write .log file of conversion output
+
+ -x, --protect Write protect the disk image if supported (fdi)
+Analysis options:
+ -z, --nibscan Use double nibble scan to find track
+ -q, --quick   Skip standard sector analysis, ok for fdi/mfi/nib
+ -1, --int     Consider only whole tracks (not quarter tracks)
+ -2, --half    Consider only half (and whole) track (not quarter tracks)
+ -c, --cheat   Write full 2.5x bit read for unparseable tracks (vs. unformatted)
+ -a, --all     Write full 2.5x bit read for all tracks (i.e. cheat everywhere)
+ -s, --slice   Write EDD bits to track length for unparseable tracks (cheat lite)
+ -0, --zero    Write EDD bits from 0 instead of found track (slice for formatted)
+ -r, --spiral  Write EDD bits in 17000-bit spiral to try to keep track sync
+ -k, --keep    Do not attempt to repair bitstream
+ -y, --sync    Try to sync the tracks
+Help and debugging:
+ -h, --help    You're looking at it.
+ -v, --verbose Be more verbose than usual
+ -w, --werbose Be way, way (ponponpon) more verbose than usual (implies -v)
+
+ Examples:
+ defedd.py -d eddfile.edd (write a dsk file, standard 16-sector format)
+ defedd.py -faq eddfile.edd (write an fdi file for OpenEmulator with all 2.5x samples)
+ 	(works for Choplifter)
+ defedd.py -qv eddfile.edd (write a v2d file for Virtual II)
+ 	(works for standard disks so far)
+ defedd.py -qn eddfile.edd (write a nib file, skip sector analysis)
+ 	(works for 16-sector disks, not stress tested yet)
+ defedd.py -fk eddfile.edd (write small fdi file for OE, don't fix bit slips)
+ 	(works for ... nothing much yet)
+ defedd.py -f eddfile.edd (write a one-revolution fdi file for OE with analysis)
+ 	(works for simple 16-sector disks)
+ defedd.py -mk eddfile.edd (write an mfi file for MESS, with analysis, no repairs)
+ 	(does not work yet)
+ 	''')
+	return
 
 if __name__ == "__main__":
 	sys.exit(main())
